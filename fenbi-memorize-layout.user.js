@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.0
-// @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限制题目宽度、自制答题卡
+// @version      2.3
+// @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡
 // @author       baimochen
 // @match        *://*.fenbi.com/*
 // @run-at       document-start
@@ -23,7 +23,7 @@
     const CONFIG = {
 
         // 题目最大宽度
-        questionMaxWidth: 1200,
+        questionMaxWidth: 900,
 
         // 右侧答题卡预留空间
         rightReserve: 250,
@@ -442,8 +442,10 @@
             /* =====================================================
                ★ 自制解析面板
 
-               默认整块不显示，
-               点过该题选项后才加 .fb-sol-visible。
+               默认整块不显示，满足下面任一条才加 .fb-sol-visible：
+               点过该题选项 / 该题已作答 / 填空题（常显）。
+
+               见 syncPanelVisibility()。
                ===================================================== */
 
             html body
@@ -748,6 +750,137 @@
                 min-width: 0 !important;
 
                 box-sizing: border-box !important;
+            }
+
+
+            /* =====================================================
+               ★ 卡片布局
+
+               题目、每个选项各自成卡片。
+
+               颜色全部走粉笔自己的 CSS 变量，
+               .dark 下自动翻转，不另配一套。
+               ===================================================== */
+
+            /*
+             * 题目卡片做在 .questions-single-container 上，
+             * 而不是里层的 .ti-container。
+             *
+             * 粉笔自己就把每个题组包在这个容器里，
+             * 而且已经给了 border-radius:8px / overflow:hidden /
+             * 白底 / padding:12px 0 16px —— 它本来就是一张卡片，
+             * 只是没画边框。
+             *
+             * 再把卡片做一层到 .ti-container 上就成了「卡中卡」：
+             * 外面那层白底和上下内边距会从卡片四周露出来，
+             * 看上去就是题目外面多了一圈东西。
+             *
+             * 题目之间的 20px 间距也不用管：
+             * 外层 .ti 本来就带 margin-bottom:20px。
+             */
+
+            html body
+            .memorize-main
+            .questions-single-container {
+
+                border:
+                    1px solid
+                    var(--color-border-section) !important;
+
+                box-shadow:
+                    0 1px 3px rgba(0, 0, 0, .04) !important;
+
+                box-sizing: border-box !important;
+            }
+
+
+            /*
+             * 题目底部留白修一下。
+             *
+             * 粉笔给 app-ti 的 14px 内边距是给「材料题」里
+             * 那条 1px 分隔线定位用的（分隔线 bottom:2px
+             * 挂在 app-ti 上），所以 :not(:last-child) 不能动。
+             *
+             * 但每张卡片的最后一道题不需要它 ——
+             * 留着就变成上下 12px / 下 14+16=30px，太偏。
+             * 归零后是 12 / 16，基本对称。
+             */
+
+            html body
+            app-ti:last-child {
+
+                padding-bottom: 0 !important;
+            }
+
+
+            /*
+             * 已答题时粉笔会在题目顶部画一条红/绿渐变条
+             * （top:-11px; left:1px; width:calc(100% - 2px);
+             *   height:110px），靠容器的 12px 上内边距
+             * 和 overflow:hidden 裁掉溢出部分、修出圆角。
+             *
+             * 现在容器多了一圈 1px 边框，内边距盒整体缩了 1px，
+             * 粉笔预留的那 1px 内缩就变成 2px ——
+             * 边框和渐变条之间会露出一条白缝。
+             *
+             * 这里把渐变条推到内边距盒的边缘，让它紧贴边框，
+             * 圆角交给容器的 overflow:hidden 去裁。
+             */
+
+            html body
+            .memorize-main
+            .questions-single-container
+            .ti-container.showBg:before {
+
+                top: -12px !important;
+
+                left: 0 !important;
+
+                width: 100% !important;
+            }
+
+
+            /*
+             * 选项卡片。
+             *
+             * 粉笔本来就给了 display:flex / padding:8px 10px /
+             * border-radius:8px / hover 变色，这里只补边框
+             * 和选项之间的间距。
+             *
+             * 不写 background：卡片本来就是白底，透明即白底，
+             * 一旦写死就会盖掉粉笔的 :hover 变色。
+             */
+
+            html body
+            .choice-radio-label,
+
+            html body
+            .choice-checkbox-label {
+
+                border:
+                    1px solid
+                    var(--color-border-choice) !important;
+
+                margin: 0 -10px 10px !important;
+
+                box-sizing: border-box !important;
+            }
+
+
+            /*
+             * 最后一个选项不留底部间距，
+             * 免得和卡片的下内边距叠在一起。
+             */
+
+            html body
+            .choice-radio:last-child
+            .choice-radio-label,
+
+            html body
+            .choice-checkbox:last-child
+            .choice-checkbox-label {
+
+                margin-bottom: 0 !important;
             }
 
 
@@ -1593,7 +1726,92 @@
 
 
     /*
-     * 单题同步：没面板就建，建过就跳过。
+     * 这道题是否已经作答。
+     *
+     * 单选 / 判断 / 多选：粉笔会给选项元素挂上
+     * correct / wrong / correctLost，三种题型通用。
+     *
+     * 填空不落在这套 class 上，用「粉笔自己渲染了原生
+     * 解析」兜底 —— 粉笔只替该显示解析的题渲染它。
+     */
+    function isAnswered(ti) {
+
+        if (
+            ti.querySelector(
+                '.input-radio.correct, ' +
+                '.input-radio.wrong, ' +
+                '.input-radio.correctLost, ' +
+                '.input-checkbox.correct, ' +
+                '.input-checkbox.wrong, ' +
+                '.input-checkbox.correctLost'
+            )
+        ) {
+            return true;
+        }
+
+
+        return !!ti.querySelector('app-result-common');
+    }
+
+
+    /*
+     * 填空题没有选项可点，解析常显。
+     */
+    function isBlank(ti) {
+
+        return !!ti.querySelector('app-solution-blank');
+    }
+
+
+    /*
+     * 面板该不该显示：
+     * 点过 → 显示；已答 → 显示（刷新后不用再点一遍）；
+     * 填空 → 常显。
+     */
+    function shouldShowPanel(ti) {
+
+        return !!(
+            ti.__fbRevealed ||
+            isBlank(ti) ||
+            isAnswered(ti)
+        );
+    }
+
+
+    /*
+     * 可见性单独抽出来，两个原因：
+     *
+     * 1. 粉笔渲染 app-result-common 比第一次 syncQuestion
+     *    晚，面板建好之后还得再刷几轮才认得出来；
+     * 2. 一旦显示就不回退，所以先看当前状态，已经可见的
+     *    直接返回，省掉每轮 mutation 的选择器开销。
+     */
+    function syncPanelVisibility(ti) {
+
+        const panel = ti.__fbPanel;
+
+
+        if (!panel || !panel.isConnected) {
+            return;
+        }
+
+
+        if (panel.classList.contains(PANEL_VISIBLE)) {
+            return;
+        }
+
+
+        if (!shouldShowPanel(ti)) {
+            return;
+        }
+
+
+        panel.classList.add(PANEL_VISIBLE);
+    }
+
+
+    /*
+     * 单题同步：没面板就建，建过就补一次可见性。
      */
     function syncQuestion(ti) {
 
@@ -1601,6 +1819,9 @@
             ti.__fbPanel &&
             ti.__fbPanel.isConnected
         ) {
+
+            syncPanelVisibility(ti);
+
             return;
         }
 
@@ -1623,21 +1844,10 @@
         }
 
 
-        const panel =
-            buildPanel(ti, data);
+        ti.__fbPanel = buildPanel(ti, data);
 
 
-        ti.__fbPanel = panel;
-
-
-        /*
-         * 用户已经点过这题，
-         * 但面板当时还没建出来（数据晚到），
-         * 这里补上可见状态。
-         */
-        if (ti.__fbRevealed) {
-            panel.classList.add(PANEL_VISIBLE);
-        }
+        syncPanelVisibility(ti);
     }
 
 
@@ -1669,11 +1879,7 @@
         }
 
 
-        if (ti.__fbPanel) {
-            ti.__fbPanel.classList.add(
-                PANEL_VISIBLE
-            );
-        }
+        syncPanelVisibility(ti);
     }
 
 
@@ -1691,11 +1897,19 @@
                 }
 
 
+                /*
+                 * 单选 / 判断用 choice-radio 这一套，
+                 * 多选用 choice-checkbox 那一套，
+                 * 两组 class 互不重叠，一起写在这里。
+                 */
                 const choice =
                     target.closest(
                         '.choice-radio, ' +
                         '.option-radio, ' +
-                        '.choice-radio-label'
+                        '.choice-radio-label, ' +
+                        '.choice-checkbox, ' +
+                        '.option-checkbox, ' +
+                        '.choice-checkbox-label'
                     );
 
 
@@ -1789,7 +2003,7 @@
         } catch (error) {
 
             console.warn(
-                '[粉笔布局优化 2.0] layout',
+                '[粉笔布局优化 2.3] layout',
                 error
             );
         }
@@ -2360,7 +2574,7 @@
         } catch (error) {
 
             console.warn(
-                '[粉笔布局优化 2.0]',
+                '[粉笔布局优化 2.3]',
                 error
             );
         }
@@ -2489,7 +2703,7 @@
 
 
         console.log(
-            '[粉笔布局优化] 2.0 已加载'
+            '[粉笔布局优化] 2.3 已加载'
         );
     }
 
