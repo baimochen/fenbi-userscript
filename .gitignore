@@ -7,3 +7,10 @@
 粉笔刷题-背题页面布局优化-*.txt
 
 .DS_Store
+
+# 测试夹具：由 test/make-fixture.mjs 从题库存档生成，同样含题库内容
+node_modules/
+test/fixtures/
+
+# Chrome 加载未打包扩展时自己生成的，不是源码
+fenbi-ai-unframe/_metadata/

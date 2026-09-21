@@ -1,0 +1,14 @@
+{
+  "name": "fenbi-userscript-dev",
+  "private": true,
+  "version": "1.0.0",
+  "description": "粉笔油猴脚本的本地开发/测试环境。脚本本身是单文件，无需构建，这里只放测试。",
+  "type": "module",
+  "scripts": {
+    "fixture": "node test/make-fixture.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}
