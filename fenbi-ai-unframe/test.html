@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>去头扩展自检</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    font: 14px/1.6 system-ui, -apple-system, "PingFang SC", sans-serif;
+    background: #f6f7f9;
+    color: #1f2328;
+  }
+  header {
+    padding: 16px 20px;
+    background: #fff;
+    border-bottom: 1px solid #e3e6ea;
+  }
+  h1 { margin: 0 0 6px; font-size: 16px; }
+  p.hint { margin: 0; color: #656d76; }
+  code {
+    background: #eef1f4;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .warn {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: #fff8e5;
+    border-left: 3px solid #d4a72c;
+    border-radius: 4px;
+    color: #6b5900;
+  }
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 12px 20px;
+    background: #fff;
+    border-bottom: 1px solid #e3e6ea;
+  }
+  nav button {
+    font: inherit;
+    padding: 5px 12px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+  }
+  nav button:hover { background: #f3f4f6; }
+  nav button.on {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: #fff;
+  }
+  main { padding: 16px 20px 40px; }
+  iframe {
+    width: 100%;
+    height: calc(100vh - 260px);
+    min-height: 360px;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    background: #fff;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>去头扩展自检</h1>
+  <p class="hint">
+    本页跑在 <code>localhost</code>，规则里把 localhost 和 fenbi.com 一起列为允许的发起方。
+  </p>
+  <div class="warn">
+    点了按钮之后站点正常显示 = 规则生效；出现「拒绝连接」「已阻止此页面」之类的浏览器提示
+    = 规则没生效，或者那个站点连 CSP 之外的招也用了（比如要求第三方 cookie）。
+  </div>
+</header>
+
+<nav id="list"></nav>
+
+<main>
+  <iframe id="stage" src="about:blank"></iframe>
+</main>
+
+<script>
+  // 和 rules.json / manifest.json 里的域名保持一致
+  const SITES = [
+    ['ChatGPT', 'https://chatgpt.com/'],
+    ['Gemini', 'https://gemini.google.com/app'],
+    ['Claude', 'https://claude.ai/new'],
+    ['DeepSeek', 'https://chat.deepseek.com/'],
+    ['Kimi', 'https://www.kimi.com/'],
+    ['豆包', 'https://www.doubao.com/chat/'],
+    ['通义千问', 'https://www.tongyi.com/qianwen/'],
+    ['腾讯元宝', 'https://yuanbao.tencent.com/chat/'],
+    ['智谱清言', 'https://chatglm.cn/main/alltoolsdetail'],
+    ['Grok', 'https://grok.com/'],
+    ['Perplexity', 'https://www.perplexity.ai/'],
+    ['Copilot', 'https://copilot.microsoft.com/']
+  ];
+
+  const list = document.getElementById('list');
+  const stage = document.getElementById('stage');
+
+  SITES.forEach(([label, url]) => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      stage.src = url;
+      for (const other of list.children) other.classList.remove('on');
+      button.classList.add('on');
+    });
+    list.append(button);
+  });
+</script>
+
+</body>
+</html>

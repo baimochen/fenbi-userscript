@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "AI 侧边栏去头",
+  "version": "1.0",
+  "description": "去掉主流 AI 站点的 X-Frame-Options / CSP，让「粉笔背题页 AI 侧边栏」能把它们真正嵌进页面里。只对来自 fenbi.com 的子框架请求生效。",
+  "permissions": [
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "*://*.chatgpt.com/*",
+    "*://*.openai.com/*",
+    "*://*.oaistatic.com/*",
+    "*://*.oaiusercontent.com/*",
+    "*://*.gemini.google.com/*",
+    "*://*.accounts.google.com/*",
+    "*://*.gstatic.com/*",
+    "*://*.googleusercontent.com/*",
+    "*://*.googleapis.com/*",
+    "*://*.claude.ai/*",
+    "*://*.anthropic.com/*",
+    "*://*.deepseek.com/*",
+    "*://*.kimi.com/*",
+    "*://*.moonshot.cn/*",
+    "*://*.doubao.com/*",
+    "*://*.byteimg.com/*",
+    "*://*.tongyi.com/*",
+    "*://*.aliyun.com/*",
+    "*://*.alicdn.com/*",
+    "*://*.yuanbao.tencent.com/*",
+    "*://*.gtimg.com/*",
+    "*://*.chatglm.cn/*",
+    "*://*.zhipuai.cn/*",
+    "*://*.grok.com/*",
+    "*://*.x.ai/*",
+    "*://*.perplexity.ai/*",
+    "*://*.copilot.microsoft.com/*",
+    "*://*.microsoft.com/*",
+    "*://*.bing.com/*",
+    "*://*.live.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.fenbi.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "unframe",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  }
+}
