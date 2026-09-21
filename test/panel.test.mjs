@@ -332,3 +332,38 @@ describe('启动日志', () => {
         );
     });
 });
+
+
+// 布局脚本的版本号。
+//
+// 和上面侧边栏那两条是一回事，只是补得晚 —— 侧边栏出事的时候才发现这份
+// 脚本也没人盯着，2.4 之前一直是「功能加了、版本号没动、日志看不出来」。
+// 两份脚本装在同一个人机器上，凭据得一样硬，所以断言也照着抄一份。
+//
+// 放在这个文件里而不是各测各的：找「版本号靠不靠得住」的时候应该只翻一处。
+
+describe('布局脚本的版本号', () => {
+
+    test('脚本里的 VERSION 和头部 @version 一致', () => {
+
+        const header = readFileSync(LAYOUT_SCRIPT, 'utf8')
+            .match(/\/\/\s*@version\s+(\S+)/);
+
+        assert.ok(header, '头部没有 @version');
+
+        assert.equal(
+            layoutApi.VERSION,
+            header[1],
+            '改了 @version 忘了改 VERSION（或反过来），日志会报错版本'
+        );
+    });
+
+    test('日志引用 VERSION，不是写死的一个数字', () => {
+
+        assert.match(
+            readFileSync(LAYOUT_SCRIPT, 'utf8'),
+            /'\[粉笔布局优化\] '\s*\+\s*VERSION\s*\+\s*' 已加载/,
+            '日志得引用 VERSION，写死的话升级之后日志还报老版本号'
+        );
+    });
+});

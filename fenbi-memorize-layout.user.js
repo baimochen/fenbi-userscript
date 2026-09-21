@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.4
+// @version      2.5
 // @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -15,6 +15,18 @@
 
 (function () {
     'use strict';
+
+    // 版本号。
+    //
+    // 只在头部 @version 和这里各写一次，测试盯着这两处必须一致 —— 对不上
+    // 就会出现「日志说 2.5，装的是 2.4」这种事，而版本号正是用来判断「我
+    // 装的是哪版」的，它自己不可信就白搭了。
+    //
+    // 这个坑真踩过，踩在隔壁的侧边栏上：加了「询问 AI」一整条链路却没动
+    // 版本号，日志和旧版一字不差，于是「点了没反应」到底是旧版没这功能、
+    // 还是新版坏了，从页面上完全看不出来。这份脚本当时是漏网的 —— 现在补上。
+    const VERSION = '2.5';
+
 
     // =========================================================
     // 配置
@@ -83,6 +95,18 @@
 
     // 复制成功提示停留时长
     const COPY_FEEDBACK_MS = 1500;
+
+
+    // 展开 / 收起按钮上的字。
+    //
+    // 提成常量是因为它俩在代码里各出现两次 —— 初始 HTML 里写一次，点完
+    // 之后再回写一次。抄两遍就会有一遍忘了改，表现是点一下按钮上的字就
+    // 变回了旧的。
+    //
+    // 展开那半句带着「解析」两个字：标题栏最左边原来有个「解析」标题，
+    // 删掉之后这层意思只能由按钮自己扛着。
+    const EXPAND_LABEL = '解析和展开 ▾';
+    const COLLAPSE_LABEL = '收起 ▴';
 
 
     // =========================================================
@@ -643,27 +667,14 @@
             }
 
 
-            html body
-            .${PANEL_CLASS} .fb-sol-title {
-
-                flex: 0 0 auto !important;
-
-                color: #303133 !important;
-
-                font-size: 13px !important;
-
-                line-height: 20px !important;
-
-                font-weight: 600 !important;
-            }
-
-
             /* =====================================================
                ★ 复制题目
 
-               和「展开 / 收起」并排，靠 margin-left:auto 这一组一起
-               顶到标题栏右侧。颜色比展开按钮重一档 —— 它是主动作，
-               展开只是看解析。
+               和「询问 AI」「展开 / 收起」并排，靠 margin-left:auto
+               这一组一起顶到标题栏右侧 —— 标题栏左边那个「解析」标题
+               已经删了，整行只剩右边这三个按钮。
+
+               颜色比展开按钮重一档 —— 它是主动作，展开只是看解析。
                ===================================================== */
 
             html body
@@ -2162,7 +2173,6 @@
                     : ''
             ) +
             '<div class="fb-sol-head">' +
-                '<span class="fb-sol-title">解析</span>' +
                 '<button type="button" class="' +
                     COPY_CLASS +
                     '">' + COPY_LABEL + '</button>' +
@@ -2171,7 +2181,8 @@
                     '">' + ASK_LABEL + '</button>' +
                 '<button type="button" class="' +
                     TOGGLE_CLASS +
-                    '" aria-expanded="false">展开 ▾</button>' +
+                    '" aria-expanded="false">' +
+                    EXPAND_LABEL + '</button>' +
             '</div>' +
             '<div class="fb-sol-body">' +
                 '<div class="fb-sol-content"></div>' +
@@ -2207,7 +2218,7 @@
 
                 setText(
                     button,
-                    open ? '收起 ▴' : '展开 ▾'
+                    open ? COLLAPSE_LABEL : EXPAND_LABEL
                 );
 
 
@@ -3324,7 +3335,7 @@
 
 
         console.log(
-            '[粉笔布局优化] 2.4 已加载'
+            '[粉笔布局优化] ' + VERSION + ' 已加载'
         );
     }
 
@@ -3342,9 +3353,16 @@
 
         module.exports = {
 
+            VERSION: VERSION,
+
             extractForCopy: extractForCopy,
             formatForCopy: formatForCopy,
             copyTextOf: copyTextOf,
+
+            // 展开按钮上的两个字。测试盯着它们别再被抄成第二份 ——
+            // 抄了的话，点一下按钮字就变回旧的。
+            EXPAND_LABEL: EXPAND_LABEL,
+            COLLAPSE_LABEL: COLLAPSE_LABEL,
 
             // 问 AI 那条链路的信道名。侧边栏的测试要拿它俩比对 ——
             // 两边对不上就是点了没反应，而且页面上一点线索都没有。
