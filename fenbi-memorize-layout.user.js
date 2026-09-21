@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.3
-// @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡
+// @version      2.4
+// @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
 // @run-at       document-start
@@ -22,16 +22,31 @@
 
     const CONFIG = {
 
-        // 题目最大宽度
+        // =====================================================
+        // 宽度 —— 要调就调这两个
+        // =====================================================
+
+        // 答题区（题干 + 选项）的宽度上限。
+        //
+        // 屏幕不够宽的时候会自动缩，不会溢出去。想让题目排得舒展就往上加，
+        // 想让它窄一点、眼睛少走些路就往下减。
         questionMaxWidth: 900,
 
-        // 右侧答题卡预留空间
-        rightReserve: 250,
+        // 答题卡的宽度。
+        //
+        // 答题卡钉在右上角，它占掉的横向空间是从答题区里扣掉的（见下面的
+        // RIGHT_RESERVE），所以改这一个数就够了，不用再去别处同步。
+        cardWidth: 220,
+
+        // =====================================================
 
         // 答题卡
         cardTop: 65,
         cardRight: 16,
-        cardWidth: 220,
+
+        // 答题卡和答题区之间留的空隙。调到 0 两块就贴一起了。
+        cardGap: 14,
+
         columns: 5,
 
         // Observer 延迟
@@ -45,12 +60,60 @@
     };
 
 
+    // 答题卡占掉的横向空间：右边距 + 卡宽 + 和答题区之间的空隙。
+    //
+    // 算出来而不是写死 —— 写死的话，改了 cardWidth 忘了改它，答题卡就压在
+    // 题目上了。这个坑原来就在，只是没人去动那个数所以没踩到。
+    const RIGHT_RESERVE =
+        CONFIG.cardRight + CONFIG.cardWidth + CONFIG.cardGap;
+
+
     const PANEL_CLASS = 'fb-sol-panel';
     const PANEL_VISIBLE = 'fb-sol-visible';
     const PANEL_EXPANDED = 'fb-sol-expanded';
     const TOGGLE_CLASS = 'fb-solution-toggle';
+    const COPY_CLASS = 'fb-copy-question';
 
     const API_KEYWORD = '/combine/static/solution';
+
+
+    // 复制按钮上显示的字，以及复制成功后短暂替换成的字
+    const COPY_LABEL = '复制题目';
+    const COPY_DONE_LABEL = '已复制 ✓';
+
+    // 复制成功提示停留时长
+    const COPY_FEEDBACK_MS = 1500;
+
+
+    // =========================================================
+    // 「询问 AI」
+    //
+    // 这个按钮自己不做任何 AI 的事 —— 它把题目写在一个 DOM 属性上，发一个
+    // 事件，然后读另一个属性看结果。真正干活的是 fenbi-ai-sidebar.user.js。
+    //
+    // 为什么不直接调函数：粉笔页面上的两份脚本各在油猴自己的沙箱里，看不到
+    // 对方的变量。能共用的只有 DOM。
+    //
+    // 为什么用属性传而不是 CustomEvent.detail：detail 跨沙箱传不传得过来
+    // 不稳，属性是两边都看得见的普通 DOM。
+    //
+    // 三个名字必须和 fenbi-ai-sidebar.user.js 里的那几个一致，有测试盯着。
+    // =========================================================
+
+    const ASK_CLASS = 'fb-ask-ai';
+
+    const ASK_LABEL = '询问 AI';
+
+    const ASK_EVENT = 'fbai-ask';
+    const ASK_ATTR = 'data-fbai-ask';
+    const ASK_RESULT_ATTR = 'data-fbai-ask-result';
+
+    // 结果码 -> 按钮上闪的字。侧边栏写码，这边负责说人话。
+    const ASK_RESULT_LABELS = {
+        sent: '已发送 ✓',
+        copied: '已复制 ✓',
+        none: '没送出去'
+    };
 
 
     let customCard = null;
@@ -596,6 +659,157 @@
 
 
             /* =====================================================
+               ★ 复制题目
+
+               和「展开 / 收起」并排，靠 margin-left:auto 这一组一起
+               顶到标题栏右侧。颜色比展开按钮重一档 —— 它是主动作，
+               展开只是看解析。
+               ===================================================== */
+
+            html body
+            .${PANEL_CLASS} .${COPY_CLASS} {
+
+                appearance: none !important;
+
+                -webkit-appearance: none !important;
+
+                flex: 0 0 auto !important;
+
+                margin: 0 0 0 auto !important;
+
+                padding: 3px 12px !important;
+
+                border: 1px solid #bcd6f2 !important;
+
+                border-radius: 999px !important;
+
+                background: #eef5fd !important;
+
+                color: #2f6feb !important;
+
+                font-family: inherit !important;
+
+                font-size: 15px !important;
+
+                line-height: 22px !important;
+
+                font-weight: 400 !important;
+
+                white-space: nowrap !important;
+
+                cursor: pointer !important;
+
+                user-select: none !important;
+
+                outline: none !important;
+
+                box-sizing: border-box !important;
+
+                transition:
+                    background 0.12s ease,
+                    border-color 0.12s ease !important;
+            }
+
+
+            html body
+            .${PANEL_CLASS} .${COPY_CLASS}:hover {
+
+                background: #e0edfc !important;
+
+                border-color: #8fbdf0 !important;
+            }
+
+
+            /* 复制成功后的瞬时反馈 */
+
+            html body
+            .${PANEL_CLASS} .${COPY_CLASS}.fb-copied {
+
+                background: #e8f6ec !important;
+
+                border-color: #a8d8b9 !important;
+
+                color: #2c8a4b !important;
+            }
+
+
+            /* =====================================================
+               ★ 询问 AI
+
+               和「复制题目」并排。做成实心蓝，跟旁边两个描边按钮区分开
+               —— 这一下会把东西发出去，是这排里唯一的主动作。
+
+               不抢 margin-left:auto，那个由复制按钮负责把整组顶到右边。
+               ===================================================== */
+
+            html body
+            .${PANEL_CLASS} .${ASK_CLASS} {
+
+                appearance: none !important;
+
+                -webkit-appearance: none !important;
+
+                flex: 0 0 auto !important;
+
+                margin: 0 0 0 8px !important;
+
+                padding: 3px 12px !important;
+
+                border: 1px solid #2f6feb !important;
+
+                border-radius: 999px !important;
+
+                background: #2f6feb !important;
+
+                color: #fff !important;
+
+                font-family: inherit !important;
+
+                font-size: 15px !important;
+
+                line-height: 22px !important;
+
+                font-weight: 400 !important;
+
+                white-space: nowrap !important;
+
+                cursor: pointer !important;
+
+                user-select: none !important;
+
+                outline: none !important;
+
+                box-sizing: border-box !important;
+
+                transition:
+                    background 0.12s ease,
+                    border-color 0.12s ease !important;
+            }
+
+
+            html body
+            .${PANEL_CLASS} .${ASK_CLASS}:hover {
+
+                background: #2a63d4 !important;
+
+                border-color: #2a63d4 !important;
+            }
+
+
+            /* 闪反馈时两个按钮共用 .fb-copied，这里要盖回实心底 */
+
+            html body
+            .${PANEL_CLASS} .${ASK_CLASS}.fb-copied {
+
+                background: #2c8a4b !important;
+
+                border-color: #2c8a4b !important;
+
+                color: #fff !important;
+            }
+
+
+            /* =====================================================
                ★ 展开 / 收起按钮
 
                本版按需求放大到 15px。
@@ -610,7 +824,7 @@
 
                 flex: 0 0 auto !important;
 
-                margin: 0 0 0 auto !important;
+                margin: 0 0 0 8px !important;
 
                 padding: 3px 12px !important;
 
@@ -713,7 +927,7 @@
 
                 width:
                     calc(
-                        100% - ${CONFIG.rightReserve}px
+                        100% - ${RIGHT_RESERVE}px
                     ) !important;
 
                 max-width:
@@ -1600,6 +1814,287 @@
 
 
     // =========================================================
+    // ★ 一键复制题目
+    //
+    // 只吃传入的元素，不碰全局，所以能在 Node 里对着真实的背题页存档跑测试。
+    //
+    // 选择器和 fenbi-ai-sidebar.user.js 里那套是同一份。两份脚本各自独立、
+    // 不共享代码，改这里的选择器时记得那边也改。
+    // =========================================================
+
+    // 题干：选择题在 app-question-choice 里，填空题在 solution-blank 的正文里
+    const COPY_STEM_SELECTOR = 'app-question-choice app-format-html';
+    const COPY_STEM_BLANK_SELECTOR = '.solution-blank-container article.content';
+
+    // 选项：单选、多选/不定项、判断题是三套不同的结构
+    const COPY_ITEM_SELECTOR = 'li.choice-radio, li.choice-checkbox';
+    const COPY_LABEL_SELECTOR = '.input-radio, .input-checkbox';
+    const COPY_TEXT_SELECTOR = 'p.input-text, app-format-html';
+
+    const COPY_BLANK = '____';
+
+
+    // Angular 会往标签之间塞大量换行缩进，统一压成单空格
+    function copyNormalize(value) {
+
+        return String(value == null ? '' : value)
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+
+    // 填空题的题干是被 <input readonly> 挖了空的，textContent 读不到 input，
+    // 直接取会得到「有目的、、有组织」这种缺字的题干，所以先把空位换成占位符。
+    // 要克隆再改，不能动真实 DOM。
+    function copyTextOf(el, blankForInput) {
+
+        if (!el) {
+            return '';
+        }
+
+
+        if (!blankForInput || !el.querySelector) {
+
+            return copyNormalize(el.textContent);
+        }
+
+
+        if (!el.querySelector('input, textarea')) {
+
+            return copyNormalize(el.textContent);
+        }
+
+
+        const node =
+            el.cloneNode(true);
+
+        const doc =
+            el.ownerDocument;
+
+
+        node.querySelectorAll('input, textarea').forEach(input => {
+
+            input.replaceWith(
+                doc.createTextNode(COPY_BLANK)
+            );
+        });
+
+
+        return copyNormalize(node.textContent);
+    }
+
+
+    // 读成结构化数据。读不出题型也读不出题干时返回 null。
+    function extractForCopy(ti) {
+
+        if (!ti || !ti.querySelector) {
+            return null;
+        }
+
+
+        const scope =
+            ti.querySelector('.ti-content') || ti;
+
+
+        const type =
+            copyTextOf(ti.querySelector('.title-type-name'));
+
+
+        const stemEl =
+
+            scope.querySelector(COPY_STEM_SELECTOR)
+            || scope.querySelector(COPY_STEM_BLANK_SELECTOR);
+
+
+        if (!type && !stemEl) {
+            return null;
+        }
+
+
+        const choices =
+
+            qsa(COPY_ITEM_SELECTOR, scope)
+
+                .map(li => ({
+
+                    label: copyTextOf(li.querySelector(COPY_LABEL_SELECTOR)),
+
+                    text: copyTextOf(li.querySelector(COPY_TEXT_SELECTOR))
+                }))
+
+                .filter(choice => choice.text);
+
+
+        return {
+
+            type: type,
+
+            index: copyTextOf(ti.querySelector('.title-index')),
+
+            stem: copyTextOf(stemEl, true),
+
+            choices: choices
+        };
+    }
+
+
+    // 拼成一段可以直接粘进 ChatGPT 的文本。
+    //
+    // 这里不带「请给出正确答案」之类的指令 —— 这个按钮的职责就是复制题目，
+    // 要连着问 AI 用侧边栏那个脚本的「问这道题」。
+    function formatForCopy(question) {
+
+        if (!question) {
+            return '';
+        }
+
+
+        const lines = [];
+
+
+        const numbering =
+
+            question.index
+                ? '第' + question.index.replace(/\.$/, '') + '题'
+                : '';
+
+
+        lines.push(
+            '【' + (question.type || '题目') + '】' + numbering
+        );
+
+
+        if (question.stem) {
+
+            lines.push(question.stem);
+        }
+
+
+        question.choices.forEach(choice => {
+
+            lines.push(
+                choice.label
+                    ? choice.label + '. ' + choice.text
+                    : choice.text
+            );
+        });
+
+
+        return lines.join('\n').trim();
+    }
+
+
+    // 剪贴板。fenbi 是 https，navigator.clipboard 可用；http 或旧浏览器上退回
+    // execCommand。
+    function copyToClipboard(text) {
+
+        try {
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+
+                navigator.clipboard.writeText(text);
+
+                return true;
+            }
+
+        } catch (error) {
+
+            // 落到下面的兜底
+        }
+
+
+        try {
+
+            const area =
+                document.createElement('textarea');
+
+
+            area.value = text;
+
+            area.style.cssText =
+                'position:fixed;left:-9999px;top:0;opacity:0;';
+
+
+            document.body.appendChild(area);
+
+            area.select();
+
+            const ok =
+                document.execCommand('copy');
+
+
+            area.remove();
+
+            return ok;
+
+        } catch (error) {
+
+            return false;
+        }
+    }
+
+
+    // 把这道题交给 AI 面板。
+    //
+    // 返回按钮上该闪的字。整条链路是同步的：dispatchEvent 会立刻跑完侧边栏
+    // 的监听器，所以这行返回的时候结果码已经写好了。
+    //
+    // 侧边栏没装、或者没跑起来的时候没人应答 —— 那就自己复制一份。这一下
+    // 不能白点。
+    function askAi(ti) {
+
+        const question =
+            extractForCopy(ti);
+
+
+        if (!question || (!question.stem && !question.choices.length)) {
+            return '没读到题目';
+        }
+
+
+        const text =
+            formatForCopy(question);
+
+
+        if (!text) {
+            return '没读到题目';
+        }
+
+
+        const root =
+            document.documentElement;
+
+
+        root.setAttribute(ASK_ATTR, text);
+
+        // 上一次的结果先擦掉，不然这次没人应答就会读到上次的
+        root.removeAttribute(ASK_RESULT_ATTR);
+
+
+        document.dispatchEvent(new Event(ASK_EVENT));
+
+
+        const result =
+            root.getAttribute(ASK_RESULT_ATTR);
+
+
+        root.removeAttribute(ASK_ATTR);
+        root.removeAttribute(ASK_RESULT_ATTR);
+
+
+        if (result && ASK_RESULT_LABELS[result]) {
+            return ASK_RESULT_LABELS[result];
+        }
+
+
+        // 没人应答：自己复制。跟「复制题目」那条路走的是同一个函数。
+        return copyToClipboard(text)
+            ? '已复制 ✓'
+            : '没送出去';
+    }
+
+
+    // =========================================================
     // ★ 自制解析面板
     // =========================================================
 
@@ -1669,6 +2164,12 @@
             '<div class="fb-sol-head">' +
                 '<span class="fb-sol-title">解析</span>' +
                 '<button type="button" class="' +
+                    COPY_CLASS +
+                    '">' + COPY_LABEL + '</button>' +
+                '<button type="button" class="' +
+                    ASK_CLASS +
+                    '">' + ASK_LABEL + '</button>' +
+                '<button type="button" class="' +
                     TOGGLE_CLASS +
                     '" aria-expanded="false">展开 ▾</button>' +
             '</div>' +
@@ -1718,10 +2219,130 @@
         );
 
 
+        /*
+         * 复制题目。
+         *
+         * 每次点击都现读一次 DOM —— 题目内容不会变，但面板是按题渲染的，
+         * 缓存一份反而要在题目更新时记得失效。
+         */
+        qs('.' + COPY_CLASS, panel).addEventListener(
+            'click',
+            function (event) {
+
+                event.preventDefault();
+
+                event.stopPropagation();
+
+
+                const copyButton =
+                    event.currentTarget;
+
+
+                const question =
+                    extractForCopy(ti);
+
+
+                if (!question || (!question.stem && !question.choices.length)) {
+
+                    flashButton(copyButton, '没读到题目', true, COPY_LABEL);
+
+                    return;
+                }
+
+
+                const ok =
+                    copyToClipboard(formatForCopy(question));
+
+
+                flashButton(
+                    copyButton,
+                    ok ? COPY_DONE_LABEL : '复制失败',
+                    !ok,
+                    COPY_LABEL
+                );
+            }
+        );
+
+
+        /*
+         * 询问 AI。
+         *
+         * 只负责把题目递出去，送不送得到是侧边栏的事 —— 它把结果码写回来，
+         * 这里照着闪一下。
+         */
+        qs('.' + ASK_CLASS, panel).addEventListener(
+            'click',
+            function (event) {
+
+                event.preventDefault();
+
+                event.stopPropagation();
+
+
+                const askButton =
+                    event.currentTarget;
+
+
+                const label =
+                    askAi(ti);
+
+
+                flashButton(
+                    askButton,
+                    label,
+                    label === '没送出去' || label === '没读到题目',
+                    ASK_LABEL
+                );
+            }
+        );
+
+
         container.appendChild(panel);
 
 
         return panel;
+    }
+
+
+    /*
+     * 按钮的瞬时反馈。
+     *
+     * 失败时停久一点（用户要看清「复制失败」），成功一闪就过。
+     * restore 是闪完之后回落到哪个文案 —— 复制和询问 AI 各是各的。
+     */
+    function flashButton(button, text, isError, restore) {
+
+        if (button.dataset.copyTimer) {
+
+            clearTimeout(
+                Number(button.dataset.copyTimer)
+            );
+        }
+
+
+        setText(button, text);
+
+
+        button.classList.toggle('fb-copied', !isError);
+
+
+        button.dataset.copyTimer =
+            String(
+                setTimeout(
+                    function () {
+
+                        setText(button, restore);
+
+                        button.classList.remove('fb-copied');
+
+                        delete button.dataset.copyTimer;
+
+                    },
+                    isError
+                        ? COPY_FEEDBACK_MS * 2
+                        : COPY_FEEDBACK_MS
+                )
+            );
     }
 
 
@@ -1942,7 +2563,7 @@
                 important(
                     main,
                     'width',
-                    `calc(100% - ${CONFIG.rightReserve}px)`
+                    `calc(100% - ${RIGHT_RESERVE}px)`
                 );
 
                 important(
@@ -2703,34 +3324,65 @@
 
 
         console.log(
-            '[粉笔布局优化] 2.3 已加载'
+            '[粉笔布局优化] 2.4 已加载'
         );
     }
 
 
     /*
-     * document-start：
-     * 先挂钩网络，再注入 CSS。
+     * 出口。
+     *
+     * 有 module 就是 Node（跑测试），只导出纯函数，一行 DOM 都不碰；
+     * 否则是浏览器，按原来的顺序启动：document-start 先挂钩网络，再注入 CSS。
+     *
+     * 测试测的就是这份要发布的代码本身，不是它的副本。
      */
 
-    installNetworkHooks();
+    if (typeof module !== 'undefined' && module.exports) {
 
-    injectStyle();
+        module.exports = {
 
+            extractForCopy: extractForCopy,
+            formatForCopy: formatForCopy,
+            copyTextOf: copyTextOf,
 
-    if (document.readyState === 'loading') {
+            // 问 AI 那条链路的信道名。侧边栏的测试要拿它俩比对 ——
+            // 两边对不上就是点了没反应，而且页面上一点线索都没有。
+            askAi: askAi,
+            ASK_EVENT: ASK_EVENT,
+            ASK_ATTR: ASK_ATTR,
+            ASK_RESULT_ATTR: ASK_RESULT_ATTR,
 
-        document.addEventListener(
-            'DOMContentLoaded',
-            init,
-            {
-                once: true
-            }
-        );
+            // 导出是为了让侧边栏脚本的测试能读到答题卡的位置 —— 那边有
+            // 一条测试盯着「AI 面板的上边缘和答题卡齐平」。数字抄一份过去
+            // 比不出来的话，改了一边另一边就悄悄错位了。
+            CONFIG: CONFIG,
+
+            // 同理，宽度那几个数也得能被读出来验
+            RIGHT_RESERVE: RIGHT_RESERVE
+        };
 
     } else {
 
-        init();
+        installNetworkHooks();
+
+        injectStyle();
+
+
+        if (document.readyState === 'loading') {
+
+            document.addEventListener(
+                'DOMContentLoaded',
+                init,
+                {
+                    once: true
+                }
+            );
+
+        } else {
+
+            init();
+        }
     }
 
 })();
