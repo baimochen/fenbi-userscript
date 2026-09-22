@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔背题页 AI 侧边栏
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.1
+// @version      2.2
 // @description  在页面左侧悬浮一块 AI 面板，支持 ChatGPT / Gemini / Claude 等 13 家。所有设置都在油猴菜单里，页面上只留一块 iframe
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -28,7 +28,7 @@
     // 这个坑真踩过：加了「询问 AI」一整条链路却没动版本号，日志还是「2.0
     // 已加载」，于是「没反应」到底是旧版没这个功能、还是新版坏了，从页面上
     // 完全看不出来，白白多绕一轮。
-    const VERSION = '2.1';
+    const VERSION = '2.2';
 
 
     // =========================================================
@@ -62,6 +62,17 @@
         // 左右留的空隙。16px 是照答题卡的 cardRight 来的，两边对称。
         panelLeft: 16,
         panelBottom: 16,
+
+        // 层级。
+        //
+        // 必须和 fenbi-memorize-layout.user.js 的 CONFIG.zIndex 相等，有测试
+        // 盯着。两块悬浮物本来就不该在两个图层上 —— 原先答题卡是
+        // 2147483646、面板是 2147483000，差一点点，于是粉笔「暂停答题」的
+        // 遮罩盖住了面板、盖不住答题卡：并排的两块，一块暗了一块还亮着。
+        //
+        // 这个数**不能调高**：遮罩在它之上，两个助手因此会被一起盖住，
+        // 这正是要的效果 —— 遮罩是模态的，浮在它上面的东西看着就是穿帮。
+        zIndex: 2147483000,
 
         // 自定义服务地址。
         //
@@ -381,7 +392,7 @@
             left: ${CONFIG.panelLeft}px;
             height: calc(100vh - ${CONFIG.panelTop + CONFIG.panelBottom}px);
             display: flex;
-            z-index: 2147483000;
+            z-index: ${CONFIG.zIndex};
             color: #1f2329;
         }
 

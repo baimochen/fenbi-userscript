@@ -7,9 +7,13 @@
 //    回来的，得靠测试按着。
 //
 // 2. 「和答题卡统一」不是一句形容词：顶部偏移要和布局脚本的 cardTop 相等，
-//    圆角/边框/阴影要和那边 .fbac-panel 的值逐条相等。所以这里的断言是去
-//    布局脚本里读真值来比，不是抄一遍数字 —— 抄的话两边一起改错，测试还
-//    是绿的。布局脚本哪天挪了答题卡，这边会红，这正是想要的。
+//    z-index 要和它相等，圆角/边框/阴影要和那边 .fbac-panel 的值逐条相等。
+//    所以这里的断言是去布局脚本里读真值来比，不是抄一遍数字 —— 抄的话两边
+//    一起改错，测试还是绿的。布局脚本哪天挪了答题卡，这边会红，这正是想要的。
+//
+//    z-index 那条尤其不能省：两个助手本来不在一个图层，答题卡高一点点，
+//    于是「暂停答题」的遮罩盖住了 AI 面板、盖不住答题卡。这种差一位数的
+//    不一致，肉眼看不出原因，只能靠测试按着。
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -122,6 +126,41 @@ describe('和答题卡统一', () => {
             sidebarCss().includes(height),
             '头部条高度和答题卡不一致，答题卡是「' + height + '」'
         );
+    });
+
+    test('z-index 和答题卡相等，两个助手才在同一个图层', () => {
+
+        assert.equal(
+            api.CONFIG.zIndex,
+            layoutApi.CONFIG.zIndex,
+            '面板和答题卡的 z-index 不一致 —— 暂停遮罩会盖住一个、盖不住另一个'
+        );
+    });
+
+    test('两个都没爬到遮罩上面去', () => {
+
+        // 粉笔的暂停遮罩在 2147483000 之上。两个助手不超过这个数，
+        // 暂停时就会被一起盖住 —— 这是要的效果：遮罩是模态的，
+        // 浮在它上面的东西看着就是穿帮。
+        assert.equal(
+            layoutApi.CONFIG.zIndex,
+            2147483000,
+            'z-index 被调过了。调高会让答题卡重新浮在暂停遮罩上面'
+        );
+    });
+
+    test('两边都引用自己的 CONFIG，没有各写一份数字', () => {
+
+        for (const [name, file] of [
+            ['布局脚本', LAYOUT_SCRIPT],
+            ['侧边栏', USERSCRIPT]
+        ]) {
+            assert.match(
+                readFileSync(file, 'utf8'),
+                /z-index:\s*\$\{CONFIG\.zIndex\}/,
+                name + ' 的 z-index 是写死的数字，没引用 CONFIG.zIndex'
+            );
+        }
     });
 });
 

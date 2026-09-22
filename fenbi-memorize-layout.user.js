@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.5
+// @version      2.6
 // @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -25,7 +25,7 @@
     // 这个坑真踩过，踩在隔壁的侧边栏上：加了「询问 AI」一整条链路却没动
     // 版本号，日志和旧版一字不差，于是「点了没反应」到底是旧版没这功能、
     // 还是新版坏了，从页面上完全看不出来。这份脚本当时是漏网的 —— 现在补上。
-    const VERSION = '2.5';
+    const VERSION = '2.6';
 
 
     // =========================================================
@@ -56,10 +56,41 @@
         cardTop: 65,
         cardRight: 16,
 
+        // 答题卡下边缘离屏幕底留多少。
+        //
+        // 它决定卡片的高度上限（题目多了就从这儿开始滚），值照抄侧边栏的
+        // panelBottom，两块悬浮物上下留白才是齐的。
+        cardBottom: 16,
+
         // 答题卡和答题区之间留的空隙。调到 0 两块就贴一起了。
         cardGap: 14,
 
-        columns: 5,
+        // 答题卡里每个题号格子的最小宽度。
+        //
+        // 一行排几个是**算出来的**，不是写死的（原先这里是个 columns: 5）。
+        // 写死的话，卡放宽了格子白白变胖、卡被媒体查询压窄了格子又挤成一条，
+        // 而且两种都不报错。
+        //
+        // 33 是照格子的高度来的 —— 格子高 33px，宽高相等就是正方形。
+        minCellWidth: 33,
+
+        // 题号格子之间的间距。
+        //
+        // 算列数要用它，画格子也要用它，所以从 CSS 提到这儿来。抄两份的话，
+        // 改了 CSS 里的 gap，列数还按老间距算，最后一行会挤出去或者缺一块。
+        gridGap: 7,
+
+        // =====================================================
+
+        // 两个悬浮物的层级。
+        //
+        // 必须和 fenbi-ai-sidebar.user.js 的 CONFIG.zIndex 相等，有测试盯着。
+        //
+        // 这个数**不能调高**：粉笔「暂停答题」的遮罩在它之上，两个助手因此
+        // 会被一起盖住 —— 这是要的效果，遮罩是模态的，浮在它上面的东西看着
+        // 就是穿帮。原先答题卡是 2147483646，比 AI 面板高一点点，于是遮罩
+        // 盖住了面板、盖不住答题卡：两块并排的悬浮物，一块暗了一块还亮着。
+        zIndex: 2147483000,
 
         // Observer 延迟
         observerDelay: 150,
@@ -138,6 +169,53 @@
         copied: '已复制 ✓',
         none: '没送出去'
     };
+
+
+    // =========================================================
+    // 「下载」按钮
+    //
+    // 答题界面右上角「交卷」旁边那个。目前只把它吃掉（点了没反应），
+    // 不做别的 —— 以后要接管下载内容，往 window.fbDownloadHook 里写函数。
+    //
+    // 用标签名认，不用 class：button 的 class 一改版就换一批，
+    // 而 app-download 是粉笔自己的组件名，改它等于改组件。
+    // =========================================================
+
+    const DOWNLOAD_SELECTOR = 'app-download';
+
+
+    // =========================================================
+    // 自定义刷题：任意出题数量
+    //
+    // 只在目录页（www.fenbi.com/spa/tiku/guide/catalog）那个「自定义刷题」
+    // 模态框里干活。别处一律不碰 —— 这是别人的页面，不是我们的。
+    // =========================================================
+
+    const CATALOG_PATH = '/spa/tiku/guide/catalog';
+
+    const COUNT_LIST_SELECTOR =
+        '.customize-question-content .question-mode-count';
+
+    const CUSTOM_COUNT_CLASS = 'fb-count-custom';
+    const CUSTOM_COUNT_INPUT_CLASS = 'fb-count-input';
+
+    // 出题数量的上下界。
+    //
+    // 上界不是随手定的：粉笔自己给的最大预设是 40。放到 500 是为了留出
+    // 「整套刷一遍」这种用法，再往上就没有意义了 —— 一次推几千道题只会把
+    // 接口拖死，而用户很可能只是多按了个 0。
+    const MIN_CUSTOM_COUNT = 1;
+    const MAX_CUSTOM_COUNT = 500;
+
+    // 探针武装多久。
+    //
+    // 点完自定义数量到点「保存」之间要留出人手操作的时间，3 秒是估的。
+    // 真过了也能在控制台敲 fbCountProbe() 再来一次。
+    const PROBE_WINDOW_MS = 3000;
+
+    // 探针日志的前缀。测试盯着它 —— 控制台里没有这个前缀就分不出哪几行
+    // 是探针打的。
+    const PROBE_TAG = '[粉笔自定义数量·探针]';
 
 
     let customCard = null;
@@ -305,6 +383,7 @@
 
                 try {
                     this.__fbUrl = url;
+                    this.__fbMethod = method;
                 } catch (e) {}
 
 
@@ -312,9 +391,20 @@
             };
 
 
-            proto.send = function () {
+            proto.send = function (body) {
 
                 try {
+
+                    /*
+                     * 探针只看不动 —— 它不改 URL 也不改 body，
+                     * 只是把发出去的东西抄一份到控制台。
+                     */
+                    noteProbeRequest(
+                        this.__fbMethod,
+                        this.__fbUrl,
+                        body
+                    );
+
 
                     if (isSolutionApi(this.__fbUrl)) {
 
@@ -355,12 +445,25 @@
 
             if (rawFetch) {
 
-                window.fetch = function (input) {
+                window.fetch = function (input, init) {
 
                     const url =
                         typeof input === 'string'
                             ? input
                             : (input && input.url) || '';
+
+
+                    try {
+
+                        noteProbeRequest(
+                            (init && init.method) ||
+                                (input && input.method) ||
+                                'GET',
+                            url,
+                            init && init.body
+                        );
+
+                    } catch (e) {}
 
 
                     const promise =
@@ -1237,7 +1340,27 @@
                     border-box !important;
 
                 z-index:
-                    2147483646 !important;
+                    ${CONFIG.zIndex} !important;
+
+                /*
+                 * 题多的时候不要一路长到屏幕外面去。
+                 *
+                 * 高度上限由上下两个留白算出来，剩下的交给 .fbac-grid
+                 * 自己滚 —— 标题、状态行、底部那行都钉着不动。
+                 */
+
+                max-height:
+                    calc(
+                        100vh
+                        - ${CONFIG.cardTop}px
+                        - ${CONFIG.cardBottom}px
+                    ) !important;
+
+                display:
+                    flex !important;
+
+                flex-direction:
+                    column !important;
 
                 font-family:
                     -apple-system,
@@ -1291,6 +1414,21 @@
 
                 box-sizing: border-box !important;
 
+                /*
+                 * 卡片是 flex 列，面板得跟着撑满，并且允许自己被压扁 ——
+                 * flex 子项的默认最小高度是内容高度，不写 min-height: 0
+                 * 的话它永远压不下去，底下那个 overflow 就永远不触发。
+                 * 这是 flex 里最经典的「明明写了滚动却滚不动」。
+                 */
+
+                display: flex !important;
+
+                flex-direction: column !important;
+
+                max-height: 100% !important;
+
+                min-height: 0 !important;
+
                 background:
                     rgba(255, 255, 255, 0.98) !important;
 
@@ -1310,6 +1448,9 @@
             .fbac-header {
 
                 height: 42px !important;
+
+                /* 标题行不参与压缩，滚的只是下面的题号 */
+                flex: 0 0 auto !important;
 
                 padding: 0 12px !important;
 
@@ -1382,6 +1523,21 @@
                 padding: 11px !important;
 
                 box-sizing: border-box !important;
+
+                /*
+                 * 竖向 flex，题号那格吃掉剩下的高度。
+                 *
+                 * min-height: 0 同上 —— 少了它这道链子就断在这儿，
+                 * 题号再多也撑不出一根滚动条。
+                 */
+
+                display: flex !important;
+
+                flex-direction: column !important;
+
+                flex: 1 1 auto !important;
+
+                min-height: 0 !important;
             }
 
 
@@ -1393,6 +1549,8 @@
                 align-items: center !important;
 
                 justify-content: space-between !important;
+
+                flex: 0 0 auto !important;
 
                 margin-bottom: 9px !important;
 
@@ -1453,6 +1611,17 @@
             }
 
 
+            /*
+             * 题号格。
+             *
+             * 一行几个由 --fbac-columns 决定，那个值是 JS 按卡片的实测宽度
+             * 算出来写上去的（见 syncCardColumns）。这里给个 5 只是兜底 ——
+             * 万一 JS 那边没跑起来，至少还是一个能看的五列。
+             *
+             * 滚的是这一格，不是整张卡：标题、状态行、底部「当前：N」都
+             * 在滚动区外面，题再多也一直看得见。
+             */
+
             #fenbi-custom-answer-card
             .fbac-grid {
 
@@ -1460,15 +1629,24 @@
 
                 grid-template-columns:
                     repeat(
-                        ${CONFIG.columns},
+                        var(--fbac-columns, 5),
                         minmax(0, 1fr)
                     ) !important;
 
-                gap: 7px !important;
+                gap: ${CONFIG.gridGap}px !important;
 
                 width: 100% !important;
 
                 box-sizing: border-box !important;
+
+                flex: 1 1 auto !important;
+
+                min-height: 0 !important;
+
+                overflow-y: auto !important;
+
+                /* 滚动条别太占地方，卡本来就窄 */
+                scrollbar-width: thin !important;
             }
 
 
@@ -1584,6 +1762,8 @@
 
                 justify-content: space-between !important;
 
+                flex: 0 0 auto !important;
+
                 margin-top: 10px !important;
 
                 padding-top: 9px !important;
@@ -1647,6 +1827,52 @@
 
                     right: 6px !important;
                 }
+            }
+
+
+            /* =====================================================
+               自定义刷题：任意出题数量
+               ===================================================== */
+
+            /*
+             * 输入框带着粉笔自己的 .select-button / .square-button，
+             * 底色、边框、圆角、高度都归它的 CSS 管 —— 这样换主题（暗色模式）
+             * 时这一项会跟着变，不会突兀地亮着。
+             *
+             * 这里只补 input 特有的那几处：原生输入框的边框、以及那个在这么
+             * 窄的格子里挤成一团的数字上下箭头。
+             */
+
+            .fb-count-input {
+
+                width: 66px !important;
+
+                padding: 0 4px !important;
+
+                text-align: center !important;
+
+                font-family: inherit !important;
+
+                box-sizing: border-box !important;
+
+                appearance: none !important;
+
+                -webkit-appearance: none !important;
+            }
+
+            .fb-count-input::-webkit-outer-spin-button,
+            .fb-count-input::-webkit-inner-spin-button {
+
+                appearance: none !important;
+
+                -webkit-appearance: none !important;
+
+                margin: 0 !important;
+            }
+
+            .fb-count-input::placeholder {
+
+                font-size: 12px !important;
             }
         `;
 
@@ -2632,10 +2858,19 @@
 
             optimizeOverall();
 
+            /*
+             * 列数的低频兜底。
+             *
+             * 正常情况下是 ResizeObserver 在管，这里只是怕它漏（比如环境
+             * 里没有 ResizeObserver）。syncCardColumns 自己会比对上一次的
+             * 列数，没变就什么都不写，所以这轮基本是白跑的。
+             */
+            syncCardColumns();
+
         } catch (error) {
 
             console.warn(
-                '[粉笔布局优化 2.3] layout',
+                '[粉笔布局优化 ' + VERSION + '] layout',
                 error
             );
         }
@@ -2645,6 +2880,147 @@
     // =========================================================
     // 答题卡
     // =========================================================
+
+    /*
+     * 一行排几个题号。
+     *
+     * 从卡片的实测宽度算，而不是读一个写死的列数 —— 卡宽本身是个会变的量
+     * （小屏的媒体查询会把它压到 195px），写死的列数到那时候就错了，而且
+     * 改卡宽的时候没人会想起来还有个数得跟着同步。
+     *
+     * 拿到的宽度可能是 0 或者 NaN（卡片刚插进 DOM、布局还没跑），所以出口
+     * 一律夹在「至少一列」上 —— 返回 0 会让 grid-template-columns 整条失效，
+     * 题号直接不见。
+     */
+    function computeColumns(innerWidth, minCellWidth, gap) {
+
+        const cell = Number(minCellWidth);
+        const space = Number(gap);
+
+        if (!Number.isFinite(cell) || cell <= 0) {
+            return 1;
+        }
+
+        if (!Number.isFinite(space) || space < 0) {
+            return 1;
+        }
+
+
+        const width = Number(innerWidth);
+
+        if (!Number.isFinite(width) || width <= 0) {
+            return 1;
+        }
+
+
+        /*
+         * n 列加上 (n-1) 个间隙正好放得下，等价于
+         * n <= (width + gap) / (cell + gap)
+         */
+        const columns = Math.floor(
+            (width + space) / (cell + space)
+        );
+
+
+        return columns >= 1 ? columns : 1;
+    }
+
+
+    // 上一次算出来的列数。值没变就不碰 DOM —— 写样式会产生 mutation，
+    // 而 observer 正盯着 body 子树，这正是那个 150ms 死循环的成因。
+    let cardColumns = 0;
+
+    let cardResizeObserver = null;
+
+
+    /*
+     * 按答题卡自己的宽度决定一行几个题号。
+     *
+     * 用 ResizeObserver 驱动，不在 mutation 热路径里量尺寸：这份脚本被
+     * 「自我触发的重排循环」咬过一次，病根就是每轮都去读几何尺寸。这里只有
+     * 卡片尺寸真变了才会跑。
+     */
+    function syncCardColumns() {
+
+        if (!customCard) {
+            return;
+        }
+
+
+        const grid = qs('.fbac-grid', customCard);
+
+
+        if (!grid) {
+            return;
+        }
+
+
+        let available = 0;
+
+
+        try {
+
+            /*
+             * 量 border box，不用 clientWidth。
+             *
+             * clientWidth 会把滚动条扣掉：题目一多、滚动条一出来，量到的
+             * 宽度就变小、列数跟着变少、卡片跟着变矮、滚动条又可能消失……
+             * 来回抖。border box 不受滚动条影响，量出来是稳的。
+             */
+            available = grid.getBoundingClientRect().width;
+
+        } catch (e) {
+            return;
+        }
+
+
+        const columns = computeColumns(
+            available,
+            CONFIG.minCellWidth,
+            CONFIG.gridGap
+        );
+
+
+        if (columns === cardColumns) {
+            return;
+        }
+
+
+        cardColumns = columns;
+
+        important(grid, '--fbac-columns', String(columns));
+    }
+
+
+    function observeCardSize() {
+
+        if (cardResizeObserver || !customCard) {
+            return;
+        }
+
+
+        if (typeof ResizeObserver !== 'function') {
+
+            /*
+             * 没有 ResizeObserver 也不至于就不动了：optimizeLayout 那轮
+             * 低频兜底里会调 syncCardColumns，只是要等到那一轮。
+             */
+            return;
+        }
+
+
+        try {
+
+            cardResizeObserver =
+                new ResizeObserver(syncCardColumns);
+
+            cardResizeObserver.observe(customCard);
+
+        } catch (e) {
+            cardResizeObserver = null;
+        }
+    }
+
 
     function getNativeAnswerButtons() {
 
@@ -3007,6 +3383,15 @@
 
 
         document.body.appendChild(customCard);
+
+
+        /*
+         * 上屏了才有宽度可量。ResizeObserver 在 observe 时会立刻回调一次，
+         * 所以量这件事交给它；这里再直接量一次是为了没有 ResizeObserver
+         * 的环境下第一屏也是对的。
+         */
+        syncCardColumns();
+        observeCardSize();
     }
 
 
@@ -3192,6 +3577,589 @@
 
 
     // =========================================================
+    // 自定义刷题：任意出题数量
+    //
+    // 目录页那个「自定义刷题」模态框里，出题数量原本只有 5/10/15/20/25/30/
+    // 35/40 八个按钮。这里往里插一个能自己输数的。
+    //
+    // ★ 当前状态：只做了界面和探针，**还没有真的把数送到粉笔那边**。
+    //   那个模态框是 Angular 的：*ngFor 渲染出来的按钮各带自己的点击监听，
+    //   我们动态插进去的节点没有，改 textContent 也不会被读到。值到底走
+    //   请求还是走组件状态，得先量一次才知道 —— 见下面的探针。
+    // =========================================================
+
+    /*
+     * 全角数字转半角。
+     *
+     * 中文输入法底下很容易打出 １２３。直接当非法的话，用户只会觉得
+     * 「输了没反应」，而他根本看不出自己输的是全角。
+     */
+    function toHalfWidthDigits(text) {
+
+        return String(text).replace(
+            /[０-９]/g,
+            char => String.fromCharCode(
+                char.charCodeAt(0) - 0xFEE0
+            )
+        );
+    }
+
+
+    /*
+     * 解析用户输的那个数。不合法返回 null。
+     *
+     * 挡的是很具体的几种输入：0、负数、小数、以及一长串里混了别的字符。
+     * 这种值一旦漏进去，粉笔那边要么报错、要么真给你推一整套题，而页面上
+     * 不会有任何提示 —— 静默出错是最难查的。
+     */
+    function parseCustomCount(text) {
+
+        if (text === null || text === undefined) {
+            return null;
+        }
+
+
+        const raw = toHalfWidthDigits(text).trim();
+
+
+        // 只认纯数字：'1e3'、'+5'、'2.5'、'20题' 一律挡掉
+        if (!/^\d+$/.test(raw)) {
+            return null;
+        }
+
+
+        const value = Number(raw);
+
+
+        if (!Number.isSafeInteger(value)) {
+            return null;
+        }
+
+
+        if (
+            value < MIN_CUSTOM_COUNT ||
+            value > MAX_CUSTOM_COUNT
+        ) {
+            return null;
+        }
+
+
+        return value;
+    }
+
+
+    /*
+     * 是不是那个「自定义刷题」的目录页。
+     *
+     * 不能用 indexOf === 0 了事：那样 /spa/tiku/guide/catalogX 也算数。
+     * 后面必须跟 / ? # 或者就到头。
+     */
+    function isCatalogPage(pathname) {
+
+        if (typeof pathname !== 'string' || !pathname) {
+            return false;
+        }
+
+
+        if (pathname === CATALOG_PATH) {
+            return true;
+        }
+
+
+        return (
+            pathname.indexOf(CATALOG_PATH) === 0 &&
+            /[/?#]/.test(pathname.charAt(CATALOG_PATH.length))
+        );
+    }
+
+
+    function onCustomCountChange(input, list) {
+
+        const value = parseCustomCount(input.value);
+
+
+        if (value === null) {
+
+            input.classList.remove('select-button-active');
+
+            return;
+        }
+
+
+        /*
+         * 选中态挪到自己身上。
+         *
+         * 只动出题数量这一组里的 —— 年份、做题模式那几组各有自己的
+         * select-button-active，一起清掉的话模态框上会同时有好几组没有
+         * 选中项，看着像坏了。
+         */
+        qsa('.select-button-active', list).forEach(
+            node => node.classList.remove('select-button-active')
+        );
+
+
+        input.classList.add('select-button-active');
+
+
+        armProbe(value);
+    }
+
+
+    function buildCustomCountOption(list) {
+
+        if (!list) {
+            return null;
+        }
+
+
+        // 模态框会被反复重建，自己先去重，别插出第二项
+        const existing = list.querySelector(
+            '.' + CUSTOM_COUNT_CLASS
+        );
+
+
+        if (existing) {
+            return existing;
+        }
+
+
+        const doc = list.ownerDocument;
+
+
+        const item = doc.createElement('li');
+
+        item.className = CUSTOM_COUNT_CLASS;
+
+
+        /*
+         * 带上粉笔自己的 class，长得才和旁边四项是一伙的 ——
+         * 自己描一套颜色边框，它换主题时这一项就会突兀地亮着。
+         */
+        const input = doc.createElement('input');
+
+        input.type = 'number';
+
+        input.className =
+            'select-button square-button ' +
+            CUSTOM_COUNT_INPUT_CLASS;
+
+        input.min = String(MIN_CUSTOM_COUNT);
+        input.max = String(MAX_CUSTOM_COUNT);
+        input.step = '1';
+        input.placeholder = '自定义';
+
+        input.title =
+            '任意出题数量（' +
+            MIN_CUSTOM_COUNT + '-' + MAX_CUSTOM_COUNT +
+            '）';
+
+        input.addEventListener(
+            'input',
+            () => onCustomCountChange(input, list)
+        );
+
+
+        item.appendChild(input);
+
+        list.appendChild(item);
+
+
+        return item;
+    }
+
+
+    // =========================================================
+    // 探针
+    //
+    // 这一轮刻意**不接管**真实出题数量 —— 值怎么送到粉笔那边还没接上。
+    // 猜着改请求字段是最坏的做法：猜错了是静默出错，猜对了也没人知道。
+    //
+    // 所以先量。点了自定义数量之后武装 3 秒，把这期间发出去的请求、
+    // localStorage 的变化、以及能不能摸到这个模态框的 Angular 组件实例，
+    // 全部打到控制台。拿到这份报告，接线就是一次到位的事。
+    // =========================================================
+
+    let probeUntil = 0;
+    let probeCount = null;
+    let probeRecords = [];
+
+    let probeExposed = false;
+    let probeTimer = null;
+
+
+    function snapshotStorage() {
+
+        const out = {};
+
+        try {
+
+            for (let i = 0; i < localStorage.length; i++) {
+
+                const key = localStorage.key(i);
+
+                out[key] = localStorage.getItem(key);
+            }
+
+        } catch (e) {}
+
+
+        return out;
+    }
+
+
+    function storageDiff(before) {
+
+        const after = snapshotStorage();
+        const lines = [];
+
+
+        Object.keys(after).forEach(
+            key => {
+
+                if (!(key in before)) {
+                    lines.push('  新增 ' + key + ' = ' + after[key]);
+
+                    return;
+                }
+
+
+                if (before[key] !== after[key]) {
+                    lines.push(
+                        '  改动 ' + key + '：' +
+                        before[key] + ' -> ' + after[key]
+                    );
+                }
+            }
+        );
+
+
+        Object.keys(before).forEach(
+            key => {
+
+                if (!(key in after)) {
+                    lines.push('  删除 ' + key);
+                }
+            }
+        );
+
+
+        return lines;
+    }
+
+
+    function bodyText(body) {
+
+        try {
+
+            if (typeof body === 'string') {
+                return body;
+            }
+
+
+            if (!body) {
+                return '';
+            }
+
+
+            if (typeof URLSearchParams !== 'undefined' &&
+                body instanceof URLSearchParams) {
+
+                return body.toString();
+            }
+
+
+            if (typeof FormData !== 'undefined' &&
+                body instanceof FormData) {
+
+                const pairs = [];
+
+                body.forEach(
+                    (value, key) => pairs.push(key + '=' + value)
+                );
+
+                return pairs.join('&');
+            }
+
+
+            return String(body);
+
+        } catch (e) {
+
+            return '(读不出 body)';
+        }
+    }
+
+
+    /*
+     * 摸一摸 Angular 的组件实例。
+     *
+     * 摸得到的话，第二轮可以直接改它的属性，不用去猜请求字段；
+     * 摸不到就只能走拦截请求那条路。这里只报情况，不动它。
+     */
+    function describeAngularContext(element) {
+
+        if (!element) {
+            return ['  找不到模态框元素'];
+        }
+
+
+        const context = element.__ngContext__;
+
+
+        if (!context) {
+            return ['  模态框上没有 __ngContext__'];
+        }
+
+
+        const lines = [];
+
+
+        try {
+
+            const instances = [];
+
+
+            if (Array.isArray(context)) {
+
+                /*
+                 * Ivy 的 LView：第 8 位是组件实例，第 3 位是父 LView。
+                 * 往上走几层是为了找到真正持有出题数量的那个组件。
+                 */
+                let view = context;
+
+                for (
+                    let depth = 0;
+                    depth < 12 && view;
+                    depth++
+                ) {
+
+                    const instance = view[8];
+
+                    if (
+                        instance &&
+                        typeof instance === 'object' &&
+                        instances.indexOf(instance) === -1
+                    ) {
+                        instances.push(instance);
+                    }
+
+                    view = view[3];
+                }
+            }
+
+
+            if (!instances.length) {
+
+                lines.push(
+                    '  拿到了 __ngContext__，但没从中找到组件实例'
+                );
+            }
+
+
+            instances.forEach(
+                instance => {
+
+                    const numbers = [];
+
+
+                    Object.keys(instance).forEach(
+                        key => {
+
+                            if (typeof instance[key] === 'number') {
+                                numbers.push(
+                                    key + '=' + instance[key]
+                                );
+                            }
+                        }
+                    );
+
+
+                    lines.push(
+                        '  实例 ' +
+                        (
+                            (instance.constructor &&
+                                instance.constructor.name) ||
+                            '匿名'
+                        ) +
+                        (
+                            numbers.length
+                                ? '，数字属性：' + numbers.join(', ')
+                                : '，没有数字属性'
+                        )
+                    );
+                }
+            );
+
+        } catch (error) {
+
+            lines.push('  读 __ngContext__ 时抛错：' + error);
+        }
+
+
+        return lines;
+    }
+
+
+    /*
+     * 探针上报。
+     *
+     * 每条请求是**当场**打出去的，不等汇总 —— 点「保存」之后页面很可能
+     * 就跳走了，汇总日志根本来不及看。汇总只是给「没跳页」的情况补一份。
+     */
+    function noteProbeRequest(method, url, body) {
+
+        if (Date.now() > probeUntil) {
+            return;
+        }
+
+
+        const text = bodyText(body);
+
+
+        const line =
+            (method || '?') + ' ' + (url || '?') +
+            (text ? '\n       body: ' + text : '');
+
+
+        probeRecords.push(line);
+
+
+        console.log(PROBE_TAG + ' 抓到请求 ' + line);
+    }
+
+
+    function finishProbe(before) {
+
+        const storage = storageDiff(before);
+
+        const context = describeAngularContext(
+            qs('.customize-question-content')
+        );
+
+
+        const lines = [
+            PROBE_TAG + ' ===== 开始 =====',
+            '自定义数量：' + probeCount,
+            '抓到的请求（' + probeRecords.length + ' 条）：'
+        ];
+
+
+        if (probeRecords.length) {
+            probeRecords.forEach(line => lines.push('  · ' + line));
+        } else {
+            lines.push('  （一条都没有 —— 是不是没点到「保存」？）');
+        }
+
+
+        lines.push('localStorage 变化：');
+
+        if (storage.length) {
+            storage.forEach(line => lines.push(line));
+        } else {
+            lines.push('  无');
+        }
+
+
+        lines.push('Angular 组件实例：');
+        context.forEach(line => lines.push(line));
+
+        lines.push(PROBE_TAG + ' ===== 以上整段贴回来 =====');
+
+
+        console.log(lines.join('\n'));
+    }
+
+
+    function armProbe(value) {
+
+        probeCount = value;
+        probeRecords = [];
+        probeUntil = Date.now() + PROBE_WINDOW_MS;
+
+
+        const before = snapshotStorage();
+
+
+        console.log(
+            PROBE_TAG + ' 已武装 ' + PROBE_WINDOW_MS + 'ms，' +
+            '自定义数量 ' + value + '。' +
+            '现在去点「保存」—— 报告会当场一行行打出来。'
+        );
+
+
+        clearTimeout(probeTimer);
+
+        probeTimer = setTimeout(
+            () => finishProbe(before),
+            PROBE_WINDOW_MS
+        );
+    }
+
+
+    function exposeProbe() {
+
+        if (probeExposed) {
+            return;
+        }
+
+
+        probeExposed = true;
+
+
+        /*
+         * 自动武装只有 3 秒，等用户想起来点「保存」往往已经过了。
+         * 控制台敲一句就能再来一次：
+         *
+         *     fbCountProbe(23)
+         */
+        try {
+
+            window.fbCountProbe = function (count) {
+
+                const value = parseCustomCount(count);
+
+
+                armProbe(
+                    value === null
+                        ? '（没给数量，只量请求）'
+                        : value
+                );
+            };
+
+        } catch (e) {}
+    }
+
+
+    /*
+     * 模态框是 Angular 按需渲染的，出现和销毁都跟着用户的点击走，
+     * 所以这里每轮热路径都看一眼 —— 不在目录页的话第一句就返回了，
+     * 代价是一次字符串比较。
+     */
+    function syncCustomCount() {
+
+        if (!isCatalogPage(location.pathname)) {
+            return;
+        }
+
+
+        const list = qs(COUNT_LIST_SELECTOR);
+
+
+        if (!list) {
+            return;
+        }
+
+
+        if (!buildCustomCountOption(list)) {
+            return;
+        }
+
+
+        exposeProbe();
+    }
+
+
+    // =========================================================
     // 热路径
     // =========================================================
 
@@ -3203,14 +4171,106 @@
 
             updateCustomCard();
 
+            syncCustomCount();
+
         } catch (error) {
 
             console.warn(
-                '[粉笔布局优化 2.3]',
+                '[粉笔布局优化 ' + VERSION + ']',
                 error
             );
         }
     }
+
+
+    // =========================================================
+    // 「下载」按钮：吃掉点击
+    //
+    // 目前什么都不做，只是让按钮点了没反应，外加一行日志。留的口子在
+    // window.fbDownloadHook —— 这份脚本是 @grant none，跑在页面上下文里，
+    // 控制台直接就能给它赋值：
+    //
+    //     fbDownloadHook = el => console.log('你点的是', el)
+    //
+    // 以后要接管下载（导出成 Markdown 之类），把逻辑写进这个函数即可，
+    // 不用回来动这里的拦截。
+    // =========================================================
+
+    function isDownloadTarget(target) {
+
+        return Boolean(
+            target &&
+            typeof target.closest === 'function' &&
+            target.closest(DOWNLOAD_SELECTOR)
+        );
+    }
+
+
+    function installDownloadGuard(doc, host) {
+
+        const root = doc || document;
+        const context = host || window;
+
+
+        root.addEventListener(
+            'click',
+            function (event) {
+
+                if (!isDownloadTarget(event.target)) {
+                    return;
+                }
+
+
+                /*
+                 * 三道都要。
+                 *
+                 * preventDefault 挡浏览器的默认动作，
+                 * stopPropagation 挡住继续往上传，
+                 * stopImmediatePropagation 挡住**同一层上**后面那些监听 ——
+                 * 粉笔自己的下载逻辑就挂在文档上，少这一道，文件照样下下来，
+                 * 而且从页面上完全看不出脚本没生效。
+                 */
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+
+
+                const element =
+                    event.target.closest(DOWNLOAD_SELECTOR);
+
+
+                console.log(
+                    '[粉笔布局优化] 下载按钮已拦截（暂无对应功能）'
+                );
+
+
+                const hook = context.fbDownloadHook;
+
+
+                if (typeof hook === 'function') {
+
+                    try {
+                        hook(element, event);
+
+                    } catch (error) {
+
+                        console.warn(
+                            '[粉笔布局优化] fbDownloadHook 抛错了',
+                            error
+                        );
+                    }
+                }
+            },
+
+            /*
+             * 捕获阶段。
+             *
+             * 挂冒泡的话，粉笔挂在 document 上的监听先跑完，下载已经开始了。
+             */
+            true
+        );
+    }
+
 
 
     // =========================================================
@@ -3307,6 +4367,8 @@
 
         installRevealListener();
 
+        installDownloadGuard();
+
 
         /*
          * Angular 延迟渲染，多补几轮。
@@ -3374,10 +4436,34 @@
             // 导出是为了让侧边栏脚本的测试能读到答题卡的位置 —— 那边有
             // 一条测试盯着「AI 面板的上边缘和答题卡齐平」。数字抄一份过去
             // 比不出来的话，改了一边另一边就悄悄错位了。
+            //
+            // z-index 同理，而且更隐蔽：两个助手差一位数，表现是暂停遮罩
+            // 盖住一个、盖不住另一个，肉眼看不出原因。
             CONFIG: CONFIG,
 
             // 同理，宽度那几个数也得能被读出来验
-            RIGHT_RESERVE: RIGHT_RESERVE
+            RIGHT_RESERVE: RIGHT_RESERVE,
+
+            // 一行几个题号。宽度是个会变的量（媒体查询会压窄卡片），
+            // 所以要测的是算式，不是某个固定的列数。
+            computeColumns: computeColumns,
+
+            // 「下载」按钮的拦截。判定是纯的，拦截要起真 DOM 来验事件
+            // 传播顺序 —— 少一道 stopImmediatePropagation 就是「看着拦了，
+            // 文件还是下下来了」，从页面上完全看不出来。
+            isDownloadTarget: isDownloadTarget,
+            installDownloadGuard: installDownloadGuard,
+            DOWNLOAD_SELECTOR: DOWNLOAD_SELECTOR,
+
+            // 自定义刷题：任意出题数量
+            parseCustomCount: parseCustomCount,
+            isCatalogPage: isCatalogPage,
+            buildCustomCountOption: buildCustomCountOption,
+
+            CUSTOM_COUNT_CLASS: CUSTOM_COUNT_CLASS,
+            COUNT_LIST_SELECTOR: COUNT_LIST_SELECTOR,
+            MIN_CUSTOM_COUNT: MIN_CUSTOM_COUNT,
+            MAX_CUSTOM_COUNT: MAX_CUSTOM_COUNT
         };
 
     } else {
