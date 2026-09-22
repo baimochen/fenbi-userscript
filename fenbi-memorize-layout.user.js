@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.8
+// @version      2.12
 // @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -25,7 +25,7 @@
     // 这个坑真踩过，踩在隔壁的侧边栏上：加了「询问 AI」一整条链路却没动
     // 版本号，日志和旧版一字不差，于是「点了没反应」到底是旧版没这功能、
     // 还是新版坏了，从页面上完全看不出来。这份脚本当时是漏网的 —— 现在补上。
-    const VERSION = '2.8';
+    const VERSION = '2.12';
 
 
     // =========================================================
@@ -51,10 +51,13 @@
         //
         // 这个数和 .fbac-body 的内边距是一对，不能单独动：题号区实宽 =
         // 本值 - 2（面板边框）- 内边距 * 2，而实宽决定一行几个题号。
-        // 240 / 16px 这一组算出来是 206px，正好还是 5 列。想再加内边距
+        // 256 / 24px 这一组算出来是 206px，正好还是 5 列。想再加内边距
         // 就得把这个数一起往上加，否则默认列数会从 5 掉到 4。
         // test/card.test.mjs 里有一条断言把这两个数绑在一起。
-        cardWidth: 240,
+        //
+        // 实宽从 220px 那版起一直是 206，两次加留白都是「卡宽加多少、
+        // 内边距就吃多少」—— 变的只有那圈留白，格子和列数一次都没动过。
+        cardWidth: 256,
 
         // =====================================================
 
@@ -109,6 +112,16 @@
         // 一个档上，比不了。
         zIndex: 900,
 
+        // 提示条的层级 —— 全脚本唯一一个**故意**高过模态层的数。
+        //
+        // 上面那条「不许高过 1000」的规矩对它不适用，因为这条提示条恰恰
+        // 是在粉笔自己的模态框里点完「保存」之后弹出来的：压在 900 的话
+        // 它就在模态遮罩底下，用户一个字也看不见，等于没提示。
+        //
+        // 代价是「暂停答题」的时候它会浮在遮罩上面。认了 —— 它自己会走
+        // （TOAST_MS 之后），而且只在刚点完保存那几秒里存在。
+        toastZ: 1001,
+
         // Observer 延迟
         observerDelay: 150,
 
@@ -135,6 +148,24 @@
     const COPY_CLASS = 'fb-copy-question';
 
     const API_KEYWORD = '/combine/static/solution';
+
+
+    /*
+     * 自定义出题数量落在哪儿。
+     *
+     * 探针实测（点「保存」时发出去的那条）：
+     *
+     *     POST //tiku.fenbi.com/activity/userquiz/updateUserQuestionInfo
+     *          ?sheetType=151&questionCount=5&yearScope=5&...
+     *
+     * 它在 **query 参数**里，不在 body。这一条是量出来的，不是猜的 ——
+     * 按 body 字段去猜的话会一直改不到，而且一点报错都没有，只是出题数量
+     * 纹丝不动。
+     */
+    const COUNT_API_KEYWORD =
+        '/activity/userquiz/updateUserQuestionInfo';
+
+    const COUNT_PARAM = 'questionCount';
 
 
     // 复制按钮上显示的字，以及复制成功后短暂替换成的字
@@ -191,8 +222,8 @@
     // =========================================================
     // 「下载」按钮
     //
-    // 答题界面右上角「交卷」旁边那个。目前只把它吃掉（点了没反应），
-    // 不做别的 —— 以后要接管下载内容，往 window.fbDownloadHook 里写函数。
+    // 答题界面右上角「交卷」旁边那个。把它吃掉，换成一个两项的菜单：
+    // 「题目成册」把点击重放给粉笔（原功能），「题目脱库」导出当前这套练习。
     //
     // 用标签名认，不用 class：button 的 class 一改版就换一批，
     // 而 app-download 是粉笔自己的组件名，改它等于改组件。
@@ -222,17 +253,6 @@
     // 接口拖死，而用户很可能只是多按了个 0。
     const MIN_CUSTOM_COUNT = 1;
     const MAX_CUSTOM_COUNT = 500;
-
-    // 探针武装多久。
-    //
-    // 点完自定义数量到点「保存」之间要留出人手操作的时间，3 秒是估的。
-    // 真过了也能在控制台敲 fbCountProbe() 再来一次。
-    const PROBE_WINDOW_MS = 3000;
-
-    // 探针日志的前缀。测试盯着它 —— 控制台里没有这个前缀就分不出哪几行
-    // 是探针打的。
-    const PROBE_TAG = '[粉笔自定义数量·探针]';
-
 
     let customCard = null;
     let observerTimer = null;
@@ -403,30 +423,59 @@
 
             proto.open = function (method, url) {
 
+                /*
+                 * 自定义出题数量在**这一步**就得换掉。
+                 *
+                 * open 是 URL 最后还能改的地方 —— 到了 send，请求行已经定
+                 * 死了，再改这个对象上的 __fbUrl 只是改给我们自己看的。
+                 *
+                 * 换到了就把它作废（一次性），理由见 pendingCustomCount。
+                 */
+                let target = url;
+
                 try {
-                    this.__fbUrl = url;
+
+                    target = consumeCustomCount(url);
+
+                    this.__fbUrl = target;
                     this.__fbMethod = method;
+
                 } catch (e) {}
 
 
-                return rawOpen.apply(this, arguments);
+                /*
+                 * 没改的话照原样把 arguments 递下去，不额外分配 ——
+                 * 这个钩子挂在页面上每一个 XHR 上，热得很。
+                 */
+                if (target === url) {
+                    return rawOpen.apply(this, arguments);
+                }
+
+
+                /*
+                 * 换到了 —— 提示用户这个数要刷新才生效。
+                 *
+                 * 包在 try 里：换 URL 已经成功了，提示条画不出来最多是没
+                 * 提示，绝不能把这条请求本身带崩。
+                 */
+                try {
+                    announceAppliedCount();
+                } catch (e) {}
+
+
+                const args =
+                    Array.prototype.slice.call(arguments);
+
+                args[1] = target;
+
+
+                return rawOpen.apply(this, args);
             };
 
 
             proto.send = function (body) {
 
                 try {
-
-                    /*
-                     * 探针只看不动 —— 它不改 URL 也不改 body，
-                     * 只是把发出去的东西抄一份到控制台。
-                     */
-                    noteProbeRequest(
-                        this.__fbMethod,
-                        this.__fbUrl,
-                        body
-                    );
-
 
                     if (isSolutionApi(this.__fbUrl)) {
 
@@ -469,27 +518,79 @@
 
                 window.fetch = function (input, init) {
 
-                    const url =
+                    const originalInput = input;
+
+
+                    let url =
                         typeof input === 'string'
                             ? input
                             : (input && input.url) || '';
 
 
+                    // 换没换过，靠它和 url 比。url 下面会被就地改掉。
+                    const originalUrl = url;
+
+
+                    /*
+                     * 自定义出题数量，和上面 XHR 那条一个道理：出站前换掉，
+                     * 换到了就作废。
+                     *
+                     * 整段裹在 try 里：换 URL 失败最多是出了预设的题数，
+                     * 绝不能把页面上**每一个** fetch 都带崩。
+                     */
                     try {
 
-                        noteProbeRequest(
-                            (init && init.method) ||
-                                (input && input.method) ||
-                                'GET',
-                            url,
-                            init && init.body
-                        );
-
-                    } catch (e) {}
+                        const fixed = consumeCustomCount(url);
 
 
+                        if (fixed !== url) {
+
+                            /*
+                             * input 是 Request 对象的时候得重新包一个 ——
+                             * 直接把字符串顶上去会把 method / headers /
+                             * body 全丢掉，那比不改还糟。
+                             *
+                             * 代价：new Request 要是抛了，这个数已经被
+                             * consumeCustomCount 花掉了，用户得重敲一次。
+                             * 认了 —— 为了它把作废规则拆成两处写（一处
+                             * 先判后销、一处先销后判），不值当。
+                             */
+                            const next =
+                                typeof input === 'string'
+                                    ? fixed
+                                    : new Request(fixed, input);
+
+
+                            input = next;
+                            url = fixed;
+                        }
+
+                    } catch (e) {
+                        input = originalInput;
+                    }
+
+
+                    /*
+                     * 和 XHR 那条一个道理：换到了就提示一下要刷新。
+                     * 同样裹在 try 里，不许把请求带崩。
+                     */
+                    if (url !== originalUrl) {
+
+                        try {
+                            announceAppliedCount();
+
+                        } catch (e) {}
+                    }
+
+
+                    /*
+                     * 改过的话不能再递 arguments —— 它里面还是原来那个
+                     * input。
+                     */
                     const promise =
-                        rawFetch.apply(this, arguments);
+                        input === originalInput
+                            ? rawFetch.apply(this, arguments)
+                            : rawFetch.call(this, input, init);
 
 
                     if (isSolutionApi(url)) {
@@ -1565,11 +1666,15 @@
 
                 /*
                  * 内边距和 cardWidth 是一对：这一层是题号区外面那圈留白，
-                 * 加它就等于减题号区实宽，也就是减列数。16px 是配着 240px
+                 * 加它就等于减题号区实宽，也就是减列数。24px 是配着 256px
                  * 的卡宽来的，两个一起改才保得住默认的 5 列。
+                 *
+                 * 11 → 16 → 24，卡宽 220 → 240 → 256：两次都是「卡宽加多少、
+                 * 内边距就吃多少」，所以题号区实宽一直是 206px，格子的宽度
+                 * 和一行几个从来没变，变的只有这圈留白。
                  */
 
-                padding: 16px !important;
+                padding: 24px !important;
 
                 box-sizing: border-box !important;
 
@@ -1683,6 +1788,25 @@
                     ) !important;
 
                 gap: ${CONFIG.gridGap}px !important;
+
+                /*
+                 * 题号区自己那圈留白，四边一样。
+                 *
+                 * 这一层是滚动容器（下面那个 overflow-y），而滚动容器的
+                 * 裁剪边是 padding box —— 自己一点 padding 都不留的话，
+                 * 第一列题号选中时的光圈（is-current 那条 box-shadow 往外
+                 * 支 2px）和 hover 时上浮的那 1px 会被切掉一条边，看着就是
+                 * 题号贴在了卡片边上。5 比这两样都宽，四边都留就都盖住了。
+                 *
+                 * 注意它吃的是 grid 的 content 宽度，而 syncCardColumns
+                 * 量的是 border box（见下面 box-sizing），量不到这圈
+                 * padding —— 所以它一大，列数还报 5，格子却在悄悄变窄，
+                 * 而且没有任何一处能量出来。test/card.test.mjs 里有一条
+                 * 盯着这个，余量只剩不到一个格子了：左右各 5 吃下来，
+                 * content 只有 196px，10 列算法下 (196+7)/40 = 5.07。
+                 */
+
+                padding: 5px !important;
 
                 width: 100% !important;
 
@@ -1922,6 +2046,133 @@
             .fb-count-input::placeholder {
 
                 font-size: 12px !important;
+            }
+
+            /* ---------------- 提示条 ---------------- */
+
+            .fb-toast {
+
+                position: fixed !important;
+
+                right: 16px !important;
+                bottom: 16px !important;
+
+                /*
+                 * 唯一一个高过模态层的数，理由写在 CONFIG.toastZ 那边。
+                 */
+                z-index: ${CONFIG.toastZ} !important;
+
+                display: flex !important;
+                align-items: center !important;
+
+                gap: 10px !important;
+
+                max-width: min(420px, calc(100vw - 32px)) !important;
+
+                padding: 10px 12px !important;
+
+                border-radius: 8px !important;
+
+                background: rgba(32, 36, 44, 0.96) !important;
+                color: #fff !important;
+
+                font-size: 13px !important;
+                line-height: 1.5 !important;
+
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28) !important;
+            }
+
+            .fb-toast-text {
+
+                flex: 1 1 auto !important;
+            }
+
+            .fb-toast-action,
+            .fb-toast-close {
+
+                flex: 0 0 auto !important;
+
+                cursor: pointer !important;
+
+                border: 0 !important;
+                border-radius: 5px !important;
+
+                font-size: 13px !important;
+                line-height: 1 !important;
+            }
+
+            .fb-toast-action {
+
+                padding: 5px 10px !important;
+
+                background: #409eff !important;
+                color: #fff !important;
+            }
+
+            .fb-toast-action:hover {
+
+                background: #66b1ff !important;
+            }
+
+            .fb-toast-close {
+
+                padding: 4px 6px !important;
+
+                background: transparent !important;
+                color: rgba(255, 255, 255, 0.55) !important;
+
+                font-size: 16px !important;
+            }
+
+            .fb-toast-close:hover {
+
+                color: #fff !important;
+            }
+
+            /* ---------------- 下载菜单 ---------------- */
+
+            .fb-dl-menu {
+
+                position: fixed !important;
+
+                z-index: ${CONFIG.zIndex} !important;
+
+                display: flex !important;
+                flex-direction: column !important;
+
+                min-width: 132px !important;
+
+                padding: 4px !important;
+
+                border: 1px solid rgba(0, 0, 0, 0.08) !important;
+                border-radius: 8px !important;
+
+                background: #fff !important;
+
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16) !important;
+            }
+
+            .fb-dl-item {
+
+                cursor: pointer !important;
+
+                padding: 8px 12px !important;
+
+                border: 0 !important;
+                border-radius: 5px !important;
+
+                background: transparent !important;
+                color: #303133 !important;
+
+                font-size: 14px !important;
+                text-align: left !important;
+                white-space: nowrap !important;
+            }
+
+            .fb-dl-item:hover {
+
+                background: #f0f6ff !important;
+                color: #409eff !important;
             }
         `;
 
@@ -3708,10 +3959,17 @@
     // 目录页那个「自定义刷题」模态框里，出题数量原本只有 5/10/15/20/25/30/
     // 35/40 八个按钮。这里往里插一个能自己输数的。
     //
-    // ★ 当前状态：只做了界面和探针，**还没有真的把数送到粉笔那边**。
-    //   那个模态框是 Angular 的：*ngFor 渲染出来的按钮各带自己的点击监听，
-    //   我们动态插进去的节点没有，改 textContent 也不会被读到。值到底走
-    //   请求还是走组件状态，得先量一次才知道 —— 见下面的探针。
+    // 值怎么送到粉笔那边：探针量出来它在 updateUserQuestionInfo 的 query
+    // 参数里（见脚本顶部 COUNT_API_KEYWORD 那段）。所以走的是**改请求**这条
+    // 路，没去动 Angular 的组件状态 —— 那个模态框是 *ngFor 渲染的，我们插
+    // 进去的节点身上没有粉笔自己的点击监听，改它的 textContent 也不会被读到。
+    //
+    // 整条链路：
+    //
+    //     输入框 → pendingCustomCount → 网络钩子出站前换掉 query → 作废
+    //
+    // 中间那两步各自有一段注释说明为什么是这个形状（尤其「为什么是一次
+    // 性的」），见 withCustomCount 和 pendingCustomCount。
     // =========================================================
 
     /*
@@ -3799,6 +4057,158 @@
     }
 
 
+    /*
+     * 用户这一次想出的题数。null = 没自定义，按粉笔自己的预设走。
+     *
+     * 只在三处会被写：输入框里敲出一个合法的数（下面 onCustomCountChange）、
+     * 点了别的预设（installCustomCount）、以及这个数已经用掉了（网络钩子）。
+     *
+     * 一次性是刻意的，而且是必须的。模态框会被 Angular 重建，我们那个输入框
+     * 跟着一起没，但这个变量不会 —— 留着的话，下次打开模态框随手点「保存」，
+     * 粉笔收到的是用户上一次敲的数，而屏幕上那个输入框早就不在了，没有任何
+     * 地方能看出这个数是从哪儿冒出来的。
+     */
+    let pendingCustomCount = null;
+
+
+    /*
+     * 刚刚真的送出去的那个数，等着弹提示条用。null = 没送过。
+     *
+     * 和 pendingCustomCount 一样是「用掉就没」的，但它俩活的时间不一样：
+     * pendingCustomCount 在网络钩子那一瞬间就没了，而这个要一直留到钩子
+     * 回过头来调 takeAppliedCustomCount 才清 —— 中间隔着几行代码。
+     *
+     * 不合并成一个变量的理由就在这儿：合并的话，「已经把数发出去了」和
+     * 「还没轮到弹提示」这两种状态分不开，弹完提示就没法知道自己该不该清。
+     */
+    let appliedCustomCount = null;
+
+
+    /*
+     * 记下一个待用的数。写这个变量的唯一入口 —— 直接赋值也行，但那样
+     * 「谁在写它」就得靠通读全文件才知道，出错时（比如某处忘了作废）
+     * 也没有一个地方可以下断点。
+     */
+    function setPendingCustomCount(value) {
+
+        pendingCustomCount = value;
+    }
+
+
+    /*
+     * 换 URL，并且**换到了就作废**。
+     *
+     * 网络钩子调的是这个，不是 withCustomCount —— 作废这条规则要是散在
+     * 两个钩子里各写一遍，早晚有一处忘了写，而那种漏法在页面上完全看不
+     * 出来（就是下次打开模态框随手点保存，出的题数莫名其妙）。
+     *
+     * 注意顺序：先判有没有换到，再作废。没换到就作废的话，页面上随便一个
+     * XHR 都能把这个数吃掉 —— 用户敲完 10，中间来一条埋点请求，保存的
+     * 时候就变回预设了，而且完全看不出为什么。
+     */
+    function consumeCustomCount(url) {
+
+        const fixed =
+            withCustomCount(url, pendingCustomCount);
+
+
+        if (fixed !== url) {
+
+            /*
+             * 先把数交给提示条那一侧，再作废。
+             *
+             * 反过来的话，等钩子回过头来要弹提示，pendingCustomCount 已经
+             * 是 null 了，只能弹一句没有数字的「已修改」—— 而用户最想确认
+             * 的恰恰是「改成了几」。
+             */
+            appliedCustomCount = pendingCustomCount;
+
+            setPendingCustomCount(null);
+        }
+
+
+        return fixed;
+    }
+
+
+    // 取走就清。提示条弹一次，不会因为别的原因再弹第二次。
+    function takeAppliedCustomCount() {
+
+        const value = appliedCustomCount;
+
+        appliedCustomCount = null;
+
+        return value;
+    }
+
+
+    /*
+     * 把自定义出题数量塞进 URL。
+     *
+     * 纯函数：不读也不写模块状态，改没改从返回值就能看出来（原样返回 = 没
+     * 改）。调用方是 installNetworkHooks —— 那里在 XHR 的 open 和 fetch 出站
+     * 前各拿它过一道。
+     *
+     * 为什么改 query 而不是 body：探针实测这个数就在 query 里（见脚本顶部
+     * COUNT_API_KEYWORD 那段）。按 body 字段猜的话会一直改不到，而且静默。
+     *
+     * 用 URL 解析而不是字符串替换：这个参数在别的参数值里出现一次就够了。
+     * searchParams 只认真正的参数名，编码也一并交给它。
+     */
+    function withCustomCount(url, count) {
+
+        if (!Number.isInteger(count) || count < 1) {
+            return url;
+        }
+
+
+        if (
+            typeof url !== 'string' ||
+            url.indexOf(COUNT_API_KEYWORD) === -1
+        ) {
+            return url;
+        }
+
+
+        let parsed;
+
+        try {
+
+            /*
+             * 必须带 base：页面上的 URL 是协议相对的（//tiku.fenbi.com/...），
+             * 单独丢给 new URL 会当场抛。
+             */
+            parsed = new URL(
+                url,
+                (typeof location !== 'undefined' && location.href) ||
+                    'https://www.fenbi.com/'
+            );
+
+        } catch (e) {
+            return url;
+        }
+
+
+        /*
+         * 本来就没带这个参数的话不碰：那多半不是这条接口，或者粉笔把字段名
+         * 改了。凭空加一个参数发出去是另一种静默出错。
+         */
+        if (!parsed.searchParams.has(COUNT_PARAM)) {
+            return url;
+        }
+
+
+        parsed.searchParams.set(COUNT_PARAM, String(count));
+
+
+        /*
+         * 返回的是绝对地址（解析之后协议补全了）。XHR 和 fetch 都收，
+         * 和原来的协议相对写法同源同协议，没有副作用。
+         */
+        return parsed.href;
+    }
+
+
     function onCustomCountChange(input, list) {
 
         const value = parseCustomCount(input.value);
@@ -3807,6 +4217,12 @@
         if (value === null) {
 
             input.classList.remove('select-button-active');
+
+            /*
+             * 输错了、或者把框清空了 —— 上一次那个数一并作废。
+             * 不作废的话，框里明明空着，保存下去却是刚才那个数。
+             */
+            setPendingCustomCount(null);
 
             return;
         }
@@ -3827,7 +4243,8 @@
         input.classList.add('select-button-active');
 
 
-        armProbe(value);
+        // 记下来，点「保存」的时候网络钩子会把它换进请求里
+        setPendingCustomCount(value);
     }
 
 
@@ -3911,369 +4328,32 @@
         first.parentElement.appendChild(input);
 
 
-        return input;
-    }
-
-
-    // =========================================================
-    // 探针
-    //
-    // 这一轮刻意**不接管**真实出题数量 —— 值怎么送到粉笔那边还没接上。
-    // 猜着改请求字段是最坏的做法：猜错了是静默出错，猜对了也没人知道。
-    //
-    // 所以先量。点了自定义数量之后武装 3 秒，把这期间发出去的请求、
-    // localStorage 的变化、以及能不能摸到这个模态框的 Angular 组件实例，
-    // 全部打到控制台。拿到这份报告，接线就是一次到位的事。
-    // =========================================================
-
-    let probeUntil = 0;
-    let probeCount = null;
-    let probeRecords = [];
-
-    let probeExposed = false;
-    let probeTimer = null;
-
-
-    function snapshotStorage() {
-
-        const out = {};
-
-        try {
-
-            for (let i = 0; i < localStorage.length; i++) {
-
-                const key = localStorage.key(i);
-
-                out[key] = localStorage.getItem(key);
-            }
-
-        } catch (e) {}
-
-
-        return out;
-    }
-
-
-    function storageDiff(before) {
-
-        const after = snapshotStorage();
-        const lines = [];
-
-
-        Object.keys(after).forEach(
-            key => {
-
-                if (!(key in before)) {
-                    lines.push('  新增 ' + key + ' = ' + after[key]);
-
-                    return;
-                }
-
-
-                if (before[key] !== after[key]) {
-                    lines.push(
-                        '  改动 ' + key + '：' +
-                        before[key] + ' -> ' + after[key]
-                    );
-                }
-            }
-        );
-
-
-        Object.keys(before).forEach(
-            key => {
-
-                if (!(key in after)) {
-                    lines.push('  删除 ' + key);
-                }
-            }
-        );
-
-
-        return lines;
-    }
-
-
-    function bodyText(body) {
-
-        try {
-
-            if (typeof body === 'string') {
-                return body;
-            }
-
-
-            if (!body) {
-                return '';
-            }
-
-
-            if (typeof URLSearchParams !== 'undefined' &&
-                body instanceof URLSearchParams) {
-
-                return body.toString();
-            }
-
-
-            if (typeof FormData !== 'undefined' &&
-                body instanceof FormData) {
-
-                const pairs = [];
-
-                body.forEach(
-                    (value, key) => pairs.push(key + '=' + value)
-                );
-
-                return pairs.join('&');
-            }
-
-
-            return String(body);
-
-        } catch (e) {
-
-            return '(读不出 body)';
-        }
-    }
-
-
-    /*
-     * 摸一摸 Angular 的组件实例。
-     *
-     * 摸得到的话，第二轮可以直接改它的属性，不用去猜请求字段；
-     * 摸不到就只能走拦截请求那条路。这里只报情况，不动它。
-     */
-    function describeAngularContext(element) {
-
-        if (!element) {
-            return ['  找不到模态框元素'];
-        }
-
-
-        const context = element.__ngContext__;
-
-
-        if (!context) {
-            return ['  模态框上没有 __ngContext__'];
-        }
-
-
-        const lines = [];
-
-
-        try {
-
-            const instances = [];
-
-
-            if (Array.isArray(context)) {
-
-                /*
-                 * Ivy 的 LView：第 8 位是组件实例，第 3 位是父 LView。
-                 * 往上走几层是为了找到真正持有出题数量的那个组件。
-                 */
-                let view = context;
-
-                for (
-                    let depth = 0;
-                    depth < 12 && view;
-                    depth++
-                ) {
-
-                    const instance = view[8];
-
-                    if (
-                        instance &&
-                        typeof instance === 'object' &&
-                        instances.indexOf(instance) === -1
-                    ) {
-                        instances.push(instance);
-                    }
-
-                    view = view[3];
-                }
-            }
-
-
-            if (!instances.length) {
-
-                lines.push(
-                    '  拿到了 __ngContext__，但没从中找到组件实例'
-                );
-            }
-
-
-            instances.forEach(
-                instance => {
-
-                    const numbers = [];
-
-
-                    Object.keys(instance).forEach(
-                        key => {
-
-                            if (typeof instance[key] === 'number') {
-                                numbers.push(
-                                    key + '=' + instance[key]
-                                );
-                            }
-                        }
-                    );
-
-
-                    lines.push(
-                        '  实例 ' +
-                        (
-                            (instance.constructor &&
-                                instance.constructor.name) ||
-                            '匿名'
-                        ) +
-                        (
-                            numbers.length
-                                ? '，数字属性：' + numbers.join(', ')
-                                : '，没有数字属性'
-                        )
-                    );
-                }
-            );
-
-        } catch (error) {
-
-            lines.push('  读 __ngContext__ 时抛错：' + error);
-        }
-
-
-        return lines;
-    }
-
-
-    /*
-     * 探针上报。
-     *
-     * 每条请求是**当场**打出去的，不等汇总 —— 点「保存」之后页面很可能
-     * 就跳走了，汇总日志根本来不及看。汇总只是给「没跳页」的情况补一份。
-     */
-    function noteProbeRequest(method, url, body) {
-
-        if (Date.now() > probeUntil) {
-            return;
-        }
-
-
-        const text = bodyText(body);
-
-
-        const line =
-            (method || '?') + ' ' + (url || '?') +
-            (text ? '\n       body: ' + text : '');
-
-
-        probeRecords.push(line);
-
-
-        console.log(PROBE_TAG + ' 抓到请求 ' + line);
-    }
-
-
-    function finishProbe(before) {
-
-        const storage = storageDiff(before);
-
-        const context = describeAngularContext(
-            qs('.customize-question-content')
-        );
-
-
-        const lines = [
-            PROBE_TAG + ' ===== 开始 =====',
-            '自定义数量：' + probeCount,
-            '抓到的请求（' + probeRecords.length + ' 条）：'
-        ];
-
-
-        if (probeRecords.length) {
-            probeRecords.forEach(line => lines.push('  · ' + line));
-        } else {
-            lines.push('  （一条都没有 —— 是不是没点到「保存」？）');
-        }
-
-
-        lines.push('localStorage 变化：');
-
-        if (storage.length) {
-            storage.forEach(line => lines.push(line));
-        } else {
-            lines.push('  无');
-        }
-
-
-        lines.push('Angular 组件实例：');
-        context.forEach(line => lines.push(line));
-
-        lines.push(PROBE_TAG + ' ===== 以上整段贴回来 =====');
-
-
-        console.log(lines.join('\n'));
-    }
-
-
-    function armProbe(value) {
-
-        probeCount = value;
-        probeRecords = [];
-        probeUntil = Date.now() + PROBE_WINDOW_MS;
-
-
-        const before = snapshotStorage();
-
-
-        console.log(
-            PROBE_TAG + ' 已武装 ' + PROBE_WINDOW_MS + 'ms，' +
-            '自定义数量 ' + value + '。' +
-            '现在去点「保存」—— 报告会当场一行行打出来。'
-        );
-
-
-        clearTimeout(probeTimer);
-
-        probeTimer = setTimeout(
-            () => finishProbe(before),
-            PROBE_WINDOW_MS
-        );
-    }
-
-
-    function exposeProbe() {
-
-        if (probeExposed) {
-            return;
-        }
-
-
-        probeExposed = true;
-
-
         /*
-         * 自动武装只有 3 秒，等用户想起来点「保存」往往已经过了。
-         * 控制台敲一句就能再来一次：
+         * 点了别的预设，自定义就作废 —— 预设优先。
          *
-         *     fbCountProbe(23)
+         * 不作废的话：用户敲了 10，又改点「20」，保存下去的还是 10，而屏幕
+         * 上亮着的是「20」。这种「页面说一套、发出去另一套」是最难查的一类
+         * 问题 —— 两边单看都是对的。
+         *
+         * 认 <a> 而不是 .select-button：我们自己那个 input 也带着
+         * select-button，但它不是 <a>，不会被这条误伤。
          */
-        try {
+        list.addEventListener('click', function (event) {
 
-            window.fbCountProbe = function (count) {
+            const preset =
+                event.target &&
+                typeof event.target.closest === 'function'
+                    ? event.target.closest('a.select-button')
+                    : null;
 
-                const value = parseCustomCount(count);
+
+            if (preset) {
+                setPendingCustomCount(null);
+            }
+        });
 
 
-                armProbe(
-                    value === null
-                        ? '（没给数量，只量请求）'
-                        : value
-                );
-            };
-
-        } catch (e) {}
+        return input;
     }
 
 
@@ -4297,13 +4377,9 @@
         }
 
 
-        if (!installCustomCount(list)) {
-            return;
-        }
-
-
-        exposeProbe();
+        installCustomCount(list);
     }
+
 
 
     // =========================================================
@@ -4330,18 +4406,184 @@
     }
 
 
+    /*
+     * 这一整块（提示条、下载菜单、导出）用的 document。
+     *
+     * 为什么不直接摸全局：这份脚本只在一个 document 上跑，看起来摸全局挺
+     * 自然 —— 但 Node 里根本没有全局 document，一摸就是 ReferenceError，
+     * 于是测试只能退回到「拿正则看源码里有没有这几个字」，而菜单和导出
+     * 恰恰是最该起真 DOM 验的两块。
+     *
+     * installDownloadGuard 拿到哪个就记哪个（浏览器里就是 document 自己），
+     * 剩下的都从这儿取。
+     */
+    let pageDoc = null;
+
+    function uiDoc() {
+
+        return pageDoc || document;
+    }
+
+
     // =========================================================
-    // 「下载」按钮：吃掉点击
+    // 提示条
     //
-    // 目前什么都不做，只是让按钮点了没反应，外加一行日志。留的口子在
-    // window.fbDownloadHook —— 这份脚本是 @grant none，跑在页面上下文里，
-    // 控制台直接就能给它赋值：
-    //
-    //     fbDownloadHook = el => console.log('你点的是', el)
-    //
-    // 以后要接管下载（导出成 Markdown 之类），把逻辑写进这个函数即可，
-    // 不用回来动这里的拦截。
+    // 屏幕右下角一条，一次只留一条（新的顶掉旧的）。答题卡在右上角，
+    // 不去挤它。
     // =========================================================
+
+    const TOAST_CLASS = 'fb-toast';
+
+    // 自己走掉之前留多久。
+    //
+    // 8 秒够看完一句话，又不至于杵在那儿碍事。带按钮的那种（要用户动手
+    // 刷新）给得更长，见 announceAppliedCount。
+    const TOAST_MS = 8000;
+
+    let toastEl = null;
+    let toastTimer = null;
+
+
+    function hideToast() {
+
+        clearTimeout(toastTimer);
+        toastTimer = null;
+
+
+        if (toastEl && toastEl.parentNode) {
+            toastEl.parentNode.removeChild(toastEl);
+        }
+
+
+        toastEl = null;
+    }
+
+
+    /*
+     * action 可给可不给：给了就多一个按钮，点了先关掉提示再跑。
+     *
+     * 不做队列。同一时刻会撞上两条提示的场景不存在，真出现了也是新的顶掉
+     * 旧的更合理 —— 用户关心的是刚发生的那件事。
+     */
+    function showToast(text, action, ms) {
+
+        const doc = uiDoc();
+
+
+        hideToast();
+
+
+        const node = doc.createElement('div');
+
+        node.className = TOAST_CLASS;
+        node.setAttribute('role', 'status');
+
+
+        const label = doc.createElement('span');
+
+        label.className = 'fb-toast-text';
+        label.textContent = text;
+
+        node.appendChild(label);
+
+
+        if (action) {
+
+            const button = doc.createElement('button');
+
+            button.type = 'button';
+            button.className = 'fb-toast-action';
+            button.textContent = action.label;
+
+            button.addEventListener('click', function () {
+
+                hideToast();
+
+                action.run();
+            });
+
+            node.appendChild(button);
+        }
+
+
+        const close = doc.createElement('button');
+
+        close.type = 'button';
+        close.className = 'fb-toast-close';
+        close.setAttribute('aria-label', '关闭');
+        close.textContent = '×';
+
+        close.addEventListener('click', hideToast);
+
+        node.appendChild(close);
+
+
+        doc.body.appendChild(node);
+
+        toastEl = node;
+
+        toastTimer = setTimeout(hideToast, ms || TOAST_MS);
+
+        return node;
+    }
+
+
+    /*
+     * 「这个数已经发出去了」那一下的提示。
+     *
+     * 为什么非要提示、非要刷新：换掉的只是**发出去的那个请求**。当前页面上
+     * 这套题是照旧数量推下来的，不会因为一条请求就变。用户敲完 10、点保存，
+     * 界面纹丝不动，看着就是没生效 —— 而它其实生效了，只是要刷新才看得见。
+     * 这条提示补的就是这个落差。
+     *
+     * 给得比普通提示长（12 秒），因为它带一个要用户动手的按钮。
+     */
+    function announceAppliedCount() {
+
+        const count = takeAppliedCustomCount();
+
+
+        if (count === null) {
+            return;
+        }
+
+
+        showToast(
+            '出题数量已改为 ' + count + '，刷新后生效',
+
+            {
+                label: '刷新',
+                run: () => location.reload()
+            },
+
+            12000
+        );
+    }
+
+
+    // =========================================================
+    // 「下载」按钮：点一下出菜单
+    //
+    // 两项：
+    //
+    //   题目成册 —— 粉笔原来那个功能。我们什么都不做，只是把它放行。
+    //   题目脱库 —— 把当前这套练习整个导出（.md + .json 两个文件）。
+    //
+    // 拦截本身没变（三道都要，理由在 installDownloadGuard 里），变的是拦
+    // 下来之后干什么 —— 以前只打一行日志，现在弹菜单。
+    // =========================================================
+
+    const DOWNLOAD_MENU_CLASS = 'fb-dl-menu';
+    const DOWNLOAD_ITEM_CLASS = 'fb-dl-item';
+
+    // 「题目成册」重放点击时举的旗子，见 replayDownload。
+    let downloadBypass = false;
+
+    let downloadMenu = null;
+
+    // 菜单是从哪个按钮弹出来的。「成册」要拿它去重放点击。
+    let downloadAnchor = null;
+
 
     function isDownloadTarget(target) {
 
@@ -4353,17 +4595,217 @@
     }
 
 
-    function installDownloadGuard(doc, host) {
+    function isDownloadMenuItem(target) {
+
+        return Boolean(
+            target &&
+            typeof target.closest === 'function' &&
+            target.closest('.' + DOWNLOAD_ITEM_CLASS)
+        );
+    }
+
+
+    function closeDownloadMenu() {
+
+        if (downloadMenu && downloadMenu.parentNode) {
+            downloadMenu.parentNode.removeChild(downloadMenu);
+        }
+
+
+        downloadMenu = null;
+    }
+
+
+    /*
+     * 菜单钉在按钮正下方。
+     *
+     * 为什么用 fixed 钉在 body 上，而不是往按钮里塞一个下拉：
+     * 塞进去的话，点菜单项那一下的 event.target 就落在 app-download 里了，
+     * 会被我们自己的守卫当成「又点了一次下载」吃掉 —— 于是点「题目脱库」
+     * 什么都不会发生，而且一点报错都没有。
+     */
+    function openDownloadMenu(anchor) {
+
+        const doc = uiDoc();
+
+
+        closeDownloadMenu();
+
+
+        if (!anchor || !doc.body) {
+            return;
+        }
+
+
+        downloadAnchor = anchor;
+
+
+        const menu = doc.createElement('div');
+
+        menu.className = DOWNLOAD_MENU_CLASS;
+
+
+        [
+            { action: 'book', label: '题目成册' },
+            { action: 'dump', label: '题目脱库' }
+        ]
+        .forEach(item => {
+
+            const button = doc.createElement('button');
+
+            button.type = 'button';
+            button.className = DOWNLOAD_ITEM_CLASS;
+            button.setAttribute('data-action', item.action);
+            button.textContent = item.label;
+
+            menu.appendChild(button);
+        });
+
+
+        doc.body.appendChild(menu);
+
+
+        const rect = anchor.getBoundingClientRect();
+
+        menu.style.top = (rect.bottom + 6) + 'px';
+
+
+        /*
+         * 右对齐到按钮的右边缘，再夹回视口里。
+         *
+         * 这个按钮贴在屏幕右上角，左对齐的话菜单有一半伸到屏幕外面去。
+         */
+        const width = menu.offsetWidth;
+
+        const view = doc.defaultView || window;
+
+        menu.style.left =
+            Math.max(
+                8,
+                Math.min(
+                    rect.right - width,
+                    view.innerWidth - width - 8
+                )
+            ) + 'px';
+
+
+        downloadMenu = menu;
+    }
+
+
+    function runDownloadAction(action) {
+
+        const anchor = downloadAnchor;
+
+
+        closeDownloadMenu();
+
+
+        if (action === 'book') {
+            replayDownload(anchor);
+
+            return;
+        }
+
+
+        if (action === 'dump') {
+            exportPractice();
+        }
+    }
+
+
+    /*
+     * 「题目成册」—— 把点击原样再放一遍，让粉笔自己的下载逻辑跑起来。
+     *
+     * 为什么不直接调它的处理函数：那是 Angular 组件里的东西，从脚本这儿
+     * 够不着。
+     *
+     * 而我们的守卫挂在 document 捕获阶段，自己再派一次照样会被自己拦住
+     * （而且拦得比粉笔还早），所以举一个旗子，守卫看见旗子直接放行。
+     *
+     * dispatchEvent 是同步的：事件走完才轮到 finally，所以复位不会早于粉笔
+     * 自己的处理。
+     */
+    function replayDownload(element) {
+
+        if (!element) {
+            return;
+        }
+
+
+        const doc = uiDoc();
+        const view = doc.defaultView || window;
+
+
+        downloadBypass = true;
+
+        try {
+
+            element.dispatchEvent(
+                new view.MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: view
+                })
+            );
+
+        } finally {
+
+            downloadBypass = false;
+        }
+    }
+
+
+    function installDownloadGuard(doc) {
 
         const root = doc || document;
-        const context = host || window;
+
+
+        // 这一整块后面的 DOM 操作都走它，理由见 pageDoc。
+        pageDoc = root;
 
 
         root.addEventListener(
             'click',
             function (event) {
 
+                /*
+                 * 菜单项得先判 —— 它不在 app-download 里，走不到下面那条路。
+                 */
+                if (isDownloadMenuItem(event.target)) {
+
+                    event.preventDefault();
+                    event.stopPropagation();
+
+
+                    runDownloadAction(
+                        event.target
+                            .closest('.' + DOWNLOAD_ITEM_CLASS)
+                            .getAttribute('data-action')
+                    );
+
+                    return;
+                }
+
+
                 if (!isDownloadTarget(event.target)) {
+
+                    /*
+                     * 点在别处。菜单开着就顺手关掉 —— 挂在这同一个监听上，
+                     * 不为「点外面关闭」再单独加一个全局监听。
+                     */
+                    if (downloadMenu) {
+                        closeDownloadMenu();
+                    }
+
+                    return;
+                }
+
+
+                /*
+                 * 「题目成册」重放的那一下。放行，让它照常传到粉笔那边。
+                 */
+                if (downloadBypass) {
                     return;
                 }
 
@@ -4374,39 +4816,17 @@
                  * preventDefault 挡浏览器的默认动作，
                  * stopPropagation 挡住继续往上传，
                  * stopImmediatePropagation 挡住**同一层上**后面那些监听 ——
-                 * 粉笔自己的下载逻辑就挂在文档上，少这一道，文件照样下下来，
-                 * 而且从页面上完全看不出脚本没生效。
+                 * 粉笔自己的下载逻辑就挂在文档上，少这一道，菜单还没看清
+                 * 文件就下下来了。
                  */
                 event.preventDefault();
                 event.stopPropagation();
                 event.stopImmediatePropagation();
 
 
-                const element =
-                    event.target.closest(DOWNLOAD_SELECTOR);
-
-
-                console.log(
-                    '[粉笔布局优化] 下载按钮已拦截（暂无对应功能）'
+                openDownloadMenu(
+                    event.target.closest(DOWNLOAD_SELECTOR)
                 );
-
-
-                const hook = context.fbDownloadHook;
-
-
-                if (typeof hook === 'function') {
-
-                    try {
-                        hook(element, event);
-
-                    } catch (error) {
-
-                        console.warn(
-                            '[粉笔布局优化] fbDownloadHook 抛错了',
-                            error
-                        );
-                    }
-                }
             },
 
             /*
@@ -4416,8 +4836,421 @@
              */
             true
         );
+
+
+        /*
+         * Esc 关菜单。挂在同一个 document 上，菜单没开时第一句就返回。
+         */
+        root.addEventListener(
+            'keydown',
+            function (event) {
+
+                if (downloadMenu && event.key === 'Escape') {
+                    closeDownloadMenu();
+                }
+            },
+            true
+        );
     }
 
+
+    // ---------------------------------------------------------
+    // 题目脱库
+    //
+    // 数据只有两个来源，各占一半：
+    //
+    //   题干 / 选项 —— 只能从 DOM 读。接口那份里没有题干。
+    //   答案 / 解析 / 来源 / 考点 —— 只有接口那份是全的。页面上只渲染
+    //                  已作答的题，没答过的题在 DOM 里根本没有这几块。
+    //
+    // 这件事**故意没有**去请求那个接口：它的 key 参数是 SPA 现生成的，脚本
+    // 复现不出来（见上面「接口拦截」那段）。所以用的是已经拦下来的那份缓存
+    // —— 换句话说，页面刚打开、接口还没回来的时候点脱库是导不出解析的。
+    // 这种情况下面会拦下来并说一声，不会装作成功。
+    // ---------------------------------------------------------
+
+    /*
+     * 正确答案。接口给的最准，DOM 里那份是兜底。
+     *
+     * correctAnswer 的具体形状没验过（脚本别处没读过它），所以这里按「字
+     * 符串 / 数组 / 什么都不是」三种都兜一遍 —— 猜错了最多是答案那一行不
+     * 好看，不会把整份导出带崩。
+     */
+    function readAnswer(raw, ti) {
+
+        const value = raw ? raw.correctAnswer : null;
+
+
+        if (Array.isArray(value)) {
+
+            return value
+                .map(item =>
+                    item && typeof item === 'object'
+                        ? (item.content || item.name || item.value || '')
+                        : item
+                )
+                .join('');
+        }
+
+
+        if (
+            value !== null &&
+            value !== undefined &&
+            typeof value !== 'object'
+        ) {
+            return String(value);
+        }
+
+
+        /*
+         * 兜底：答过的题页面上有「正确答案」那一格。没答过的没有。
+         *
+         * ti 要判一下：qs 的第二个参数是有默认值的形参，传 null 进去不会
+         * 落回 document，而是当场 null.querySelector 抛掉。
+         */
+        const dom = ti
+            ? qs('.overall-item-value.correct-answer', ti)
+            : null;
+
+        return dom ? copyTextOf(dom) : '';
+    }
+
+
+    /*
+     * 解析正文是接口给的 HTML（<p>…</p>），Markdown 里要纯文本。
+     *
+     * 不做通用的 HTML → Markdown：这份 HTML 是粉笔自己生成的，结构很窄
+     * （段落 + 行内标签），一个通用转换器带来的边界情况比它解决的问题多。
+     *
+     * &amp; 必须最后解 —— 提前解的话，「&amp;lt;」会被解成「<」。
+     */
+    function htmlToText(html) {
+
+        return String(html == null ? '' : html)
+            .replace(/<\s*br\s*\/?>/gi, '\n')
+            .replace(/<\s*\/\s*(p|div|li|h[1-6])\s*>/gi, '\n\n')
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#0*39;/g, '\'')
+            .replace(/&amp;/gi, '&')
+            .replace(/[ \t]+/g, ' ')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+
+    /*
+     * 页面上这套练习，一道一道摘出来。
+     *
+     * 纯读，不写 DOM（也就不会触发重排和 observer），所以能对着真实的背题页
+     * 存档在 Node 里跑。
+     */
+    function collectQuestions(root) {
+
+        return qsa('app-ti', root || uiDoc())
+            .map(ti => {
+
+                const copy = extractForCopy(ti);
+
+
+                if (!copy) {
+                    return null;
+                }
+
+
+                const key =
+                    ti.getAttribute('data-question-key') || '';
+
+                const data =
+                    resolveQuestionData(ti) || {};
+
+                const raw =
+                    solutionCache.get(key) || null;
+
+
+                return {
+
+                    key: key,
+                    index: copy.index,
+                    type: copy.type,
+                    stem: copy.stem,
+                    choices: copy.choices,
+
+                    answer: readAnswer(raw, ti),
+
+                    solution: htmlToText(data.solution),
+                    source: data.source || '',
+                    keypoints: data.keypoints || [],
+
+                    /*
+                     * 接口原样返回的那个对象。
+                     *
+                     * 上面那些字段是给它做的翻译，翻译就会丢东西 ——
+                     * 留着原件，以后想做别的处理（错题本、按考点归类）
+                     * 不用再爬一遍接口。
+                     *
+                     * 缓存没命中时是 null，不是 undefined：JSON 里
+                     * undefined 那个键会整个消失，null 至少看得出来
+                     * 「这儿本来有个东西，没拿到」。
+                     */
+                    api: raw
+                };
+            })
+            .filter(Boolean);
+    }
+
+
+    /*
+     * 文件名。题目里的日期、冒号、斜杠全得压掉 —— 冒号在 Windows 上是非法
+     * 字符，而「来源」那一栏恰好就爱写「2025年4月26日 10:30」这种东西。
+     */
+    function exportFilename(title, date) {
+
+        const safe =
+            String(title || '粉笔练习')
+                .replace(/[\\/:*?"<>|\s]+/g, '_')
+                .replace(/^_+|_+$/g, '')
+                .slice(0, 80) || '粉笔练习';
+
+
+        const pad = value => String(value).padStart(2, '0');
+
+
+        return safe + '_' +
+            date.getFullYear() +
+            pad(date.getMonth() + 1) +
+            pad(date.getDate()) + '-' +
+            pad(date.getHours()) +
+            pad(date.getMinutes());
+    }
+
+
+    function formatExportMarkdown(questions, meta) {
+
+        const lines = [];
+
+
+        lines.push('# ' + meta.title);
+        lines.push('');
+        lines.push('- 导出时间：' + meta.time);
+        lines.push('- 共 ' + questions.length + ' 题');
+        lines.push('');
+
+
+        questions.forEach(question => {
+
+            lines.push('---');
+            lines.push('');
+            lines.push(
+                '## ' + question.index + ' ' + question.type
+            );
+
+
+            if (question.stem) {
+                lines.push('');
+                lines.push(question.stem);
+            }
+
+
+            if (question.choices.length) {
+
+                lines.push('');
+
+                question.choices.forEach(choice => {
+                    lines.push(
+                        '- **' + choice.label + '** ' + choice.text
+                    );
+                });
+            }
+
+
+            const facts = [];
+
+
+            if (question.answer) {
+                facts.push('**正确答案：** ' + question.answer);
+            }
+
+            if (question.source) {
+                facts.push('**来源：** ' + question.source);
+            }
+
+            if (question.keypoints.length) {
+                facts.push(
+                    '**考点：** ' + question.keypoints.join('、')
+                );
+            }
+
+
+            if (facts.length) {
+                lines.push('');
+                facts.forEach(line => lines.push(line));
+            }
+
+
+            if (question.solution) {
+
+                lines.push('');
+                lines.push('**解析：**');
+                lines.push('');
+                lines.push(question.solution);
+            }
+        });
+
+
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+
+
+        return lines.join('\n');
+    }
+
+
+    function formatExportJson(questions, meta) {
+
+        return JSON.stringify(
+            {
+                title: meta.title,
+                url: meta.url,
+                exportedAt: meta.time,
+                count: questions.length,
+                questions: questions
+            },
+            null,
+            2
+        );
+    }
+
+
+    /*
+     * 练习的名字。优先读页面上那个标题元素 —— 用户看见的是什么，文件就叫
+     * 什么。读不到再退回 document.title。
+     */
+    function readPageTitle() {
+
+        const doc = uiDoc();
+        const el = qs('.header-title', doc);
+
+        const text = el
+            ? (el.getAttribute('title') || el.textContent || '').trim()
+            : '';
+
+
+        return text || (doc.title || '').trim() || '粉笔练习';
+    }
+
+
+    function ymdhm(date) {
+
+        const pad = value => String(value).padStart(2, '0');
+
+
+        return date.getFullYear() + '-' +
+            pad(date.getMonth() + 1) + '-' +
+            pad(date.getDate()) + ' ' +
+            pad(date.getHours()) + ':' +
+            pad(date.getMinutes());
+    }
+
+
+    /*
+     * Blob + <a download>。
+     *
+     * 不用 data: URI：题目一多那个地址会长到浏览器直接拒绝打开，而且是静默
+     * 失败，页面上什么都看不出来。
+     */
+    function saveTextFile(name, text, mime) {
+
+        const blob = new Blob(
+            [text],
+            { type: mime + ';charset=utf-8' }
+        );
+
+        const doc = uiDoc();
+
+        const url = URL.createObjectURL(blob);
+
+        const link = doc.createElement('a');
+
+        link.href = url;
+        link.download = name;
+        link.style.display = 'none';
+
+
+        doc.body.appendChild(link);
+        link.click();
+        link.parentNode.removeChild(link);
+
+
+        /*
+         * 立刻 revoke 会把还没开始的下载掐掉，得留一会儿。
+         */
+        setTimeout(
+            () => URL.revokeObjectURL(url),
+            10000
+        );
+    }
+
+
+    function exportPractice() {
+
+        const questions = collectQuestions();
+
+
+        if (!questions.length) {
+
+            showToast('这个页面上没有题目，没什么可导的');
+
+            return;
+        }
+
+
+        /*
+         * 缓存是空的 = 接口还没回来（或者压根没拦住）。
+         *
+         * 这时候导出去的就是一堆只有题干、没有答案也没有解析的东西 ——
+         * 看着像成功了，实际是个空壳，而且从文件本身完全看不出来。
+         * 宁可让用户等一下再点一次。
+         */
+        if (!solutionCache.size) {
+
+            showToast('解析数据还没到手，等页面加载完再试一次');
+
+            return;
+        }
+
+
+        const title = readPageTitle();
+        const now = new Date();
+
+        const meta = {
+            title: title,
+            url: (uiDoc().location || {}).href || '',
+            time: ymdhm(now)
+        };
+
+        const name = exportFilename(title, now);
+
+
+        saveTextFile(
+            name + '.md',
+            formatExportMarkdown(questions, meta),
+            'text/markdown'
+        );
+
+        saveTextFile(
+            name + '.json',
+            formatExportJson(questions, meta),
+            'application/json'
+        );
+
+
+        showToast('已导出 ' + questions.length + ' 道题');
+    }
 
 
     // =========================================================
@@ -4596,11 +5429,36 @@
             computeColumns: computeColumns,
 
             // 「下载」按钮的拦截。判定是纯的，拦截要起真 DOM 来验事件
-            // 传播顺序 —— 少一道 stopImmediatePropagation 就是「看着拦了，
-            // 文件还是下下来了」，从页面上完全看不出来。
+            // 传播顺序 —— 少一道 stopImmediatePropagation 就是「菜单还没
+            // 看清，文件已经下下来了」，从页面上完全看不出来。
             isDownloadTarget: isDownloadTarget,
+            isDownloadMenuItem: isDownloadMenuItem,
             installDownloadGuard: installDownloadGuard,
             DOWNLOAD_SELECTOR: DOWNLOAD_SELECTOR,
+            DOWNLOAD_ITEM_CLASS: DOWNLOAD_ITEM_CLASS,
+
+            // 题目脱库。入参出参都是纯数据，不碰 DOM —— 所以能拿真实的
+            // 背题页存档跑一遍，验的是「导出来的东西对不对」，
+            // 而不是「这几个函数名在不在」。
+            collectQuestions: collectQuestions,
+            htmlToText: htmlToText,
+            readAnswer: readAnswer,
+            exportFilename: exportFilename,
+            formatExportMarkdown: formatExportMarkdown,
+            formatExportJson: formatExportJson,
+
+            // 提示条。「用掉就没」这条规则和弹出本身是两件事，分开验：
+            // 前者是纯的，后者要起真 DOM。
+            takeAppliedCustomCount: takeAppliedCustomCount,
+            announceAppliedCount: announceAppliedCount,
+            showToast: showToast,
+            hideToast: hideToast,
+            TOAST_CLASS: TOAST_CLASS,
+
+            // 接口缓存。导出是为了让脱库的测试能往里塞一份假响应 ——
+            // 那个 Map 平时只由网络钩子写，测试里够不着，而「导出的时候
+            // 答案和解析从缓存里取」这件事不验一遍就等于没做。
+            solutionCache: solutionCache,
 
             // 没题目就把答题卡收起来。判定和切换是同一件事（要区分
             // 「刚露出来」和「一直露着」，后者不该重量宽度），所以只出
@@ -4612,6 +5470,18 @@
             parseCustomCount: parseCustomCount,
             isCatalogPage: isCatalogPage,
             installCustomCount: installCustomCount,
+
+            // 把用户敲的数换进请求里。纯函数 —— 不读也不写模块状态，
+            // 改没改从返回值就能看出来，所以能直接对着 URL 字符串验。
+            withCustomCount: withCustomCount,
+            COUNT_API_KEYWORD: COUNT_API_KEYWORD,
+            COUNT_PARAM: COUNT_PARAM,
+
+            // 「换到了就作废」这条规则本身。提成函数是为了能真验一遍 ——
+            // 「用完作废」和「没换到就不吃」这两件事，拿源码正则只能验到
+            // 「这行字在不在」，验不到它到底会不会执行。
+            setPendingCustomCount: setPendingCustomCount,
+            consumeCustomCount: consumeCustomCount,
 
             CUSTOM_COUNT_INPUT_CLASS: CUSTOM_COUNT_INPUT_CLASS,
             COUNT_LIST_SELECTOR: COUNT_LIST_SELECTOR,

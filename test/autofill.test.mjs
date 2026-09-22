@@ -664,7 +664,39 @@ describe('发送', () => {
 
             api.fillWhenReady('题目内容', Date.now() + 1000);
 
-            await new Promise(resolve => setTimeout(resolve, 30));
+            /*
+             * 等整条链子走完，而不是等一个「差不多够了」的毫秒数。
+             *
+             * 这条链子是：填入 → 隔 sendDelay 点发送 → 再隔 sendVerifyDelay
+             * 回来验一眼编辑器空没空。验完那一下会弹一条提示，弹提示要摸
+             * document。
+             *
+             * 原来这儿等的是 30ms。定时器一多，Node 会把同一批到期的攒在
+             * 一起跑，那条「回来验一眼」就可能排在 30ms 那条**后面** ——
+             * 于是这条用例先醒了，下面 finally 把 globalThis.document 摘掉，
+             * 它才醒过来一摸 document，就是一句 ReferenceError，而且是在
+             * 用例已经结束之后才炸的，只看结果根本看不出是谁干的。
+             *
+             * 终点是验完那一眼弹的那条提示。不能等「提示条出现了」——
+             * 填入那一步是同步的，一进去就已经弹了「正在发送…」，等于没等。
+             */
+            const terminal = ['题目已发送', '没发出去，题目还在输入框里'];
+
+            const said = () => {
+                const node = doc.getElementById('fbai-autofill-toast');
+                return node && terminal.includes(node.textContent);
+            };
+
+            const deadline = Date.now() + 3000;
+
+            while (!said() && Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 5));
+            }
+
+            assert.ok(
+                said(),
+                '三秒过去这条链子还没走到头 —— 卡在填入到发送中间了'
+            );
 
         } finally {
 

@@ -54,12 +54,15 @@ describe('一行几个题号', () => {
 
     test('默认卡宽下还是 5 列', () => {
 
-        // 240px 的卡：减去面板 1px 边框两侧、body 16px 内边距两侧，题号区
+        // 256px 的卡：减去面板 1px 边框两侧、body 24px 内边距两侧，题号区
         // 实宽 206px。这条是防回归的锚点 —— 内边距和卡宽是一起调的，
         // 目的是让留白变大而列数纹丝不动，谁再单独动其中一个都会撞到这儿。
         //
-        // 反过来说：内边距只要超过 16px（或者卡宽掉回 220px），这里就会
-        // 变成 4 列。所以这两个数是一对，不能拆开改。
+        // 注意实宽一直是 206：两次加内边距都是「卡宽加多少、内边距就吃多少」，
+        // 所以格子的大小和列数从 220px 那版起就没变过，变的只有那圈留白。
+        //
+        // 反过来说：内边距只要超过 24px（或者卡宽掉回 256px 以下），这里
+        // 就会变成 4 列。所以这两个数是一对，不能拆开改。
         assert.equal(
             layout.computeColumns(206, layout.CONFIG.minCellWidth, layout.CONFIG.gridGap),
             5,
@@ -72,15 +75,46 @@ describe('一行几个题号', () => {
         // 上面那条锚的是 206 这个数，但它得真的由 cardWidth 和内边距推出来，
         // 否则改了 CONFIG 而锚点还绿着，等于没盯着。
         assert.equal(
-            layout.CONFIG.cardWidth - 2 - 16 * 2,
+            layout.CONFIG.cardWidth - 2 - 24 * 2,
             206,
             'cardWidth 或内边距动过了，上面那条锚点的 206 已经不是真的了'
         );
 
         assert.match(
             cssBlock('.fbac-body {'),
-            /padding:\s*16px/,
-            '.fbac-body 的内边距不是 16px —— 上面那条算式里的 16 就成了一句谎话'
+            /padding:\s*24px/,
+            '.fbac-body 的内边距不是 24px —— 上面那条算式里的 24 就成了一句谎话'
+        );
+    });
+
+    test('题号区自己那圈留白不能把列数挤掉', () => {
+
+        // 上面那层 .fbac-body 的 24px 是卡片四周的留白，这一层是题号区
+        // 自己的：.fbac-grid 是 overflow: auto 的滚动容器，而滚动容器的
+        // 裁剪边是 padding box —— 自己一点 padding 都不留，第一列题号选中
+        // 时的光圈（is-current 那条 box-shadow 往外支 2px）就被切掉一条边。
+        // 5 比光圈和 hover 上浮那 1px 都宽，四边都留就都盖住了。
+        //
+        // 但它同时在减 grid 的 content 宽度，而 syncCardColumns 量的是
+        // border box（206，padding 算在里面），量不到这圈 padding。所以它
+        // 一大，列数还报 5，格子却在悄悄变窄，最后挤成一条 —— 而且没有
+        // 任何一处能量得出来。
+        assert.match(
+            cssBlock('.fbac-grid {'),
+            /padding:\s*5px\b(?!\s+\d)/,
+            '.fbac-grid 的留白动过了，下面那条算式里的 10 就不再是真的'
+        );
+
+        // 余量很薄：(196 + 7) / (33 + 7) = 5.075，再多一个像素就掉到 4 列。
+        // 所以这条不是「顺便验一下」，是这一版唯一挡在 4 列前面的东西。
+        assert.equal(
+            layout.computeColumns(
+                206 - 5 * 2,
+                layout.CONFIG.minCellWidth,
+                layout.CONFIG.gridGap
+            ),
+            5,
+            '题号区自己那圈留白把列数从 5 挤掉了'
         );
     });
 

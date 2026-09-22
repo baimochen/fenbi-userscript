@@ -8,14 +8,12 @@
 // 判定和拦截分开测：判定是纯的（认不认这个元素），拦截要起一个真 DOM
 // 来验事件传播顺序 —— 这两件事坏起来的样子完全不同。
 
-import { test, describe, before } from 'node:test';
+import { test, describe, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { loadModule, LAYOUT_SCRIPT } from './harness.mjs';
 
 let layout;
-let source;
 let win;
 let doc;
 
@@ -35,13 +33,12 @@ const PAGE = `
 
 before(() => {
     layout = loadModule(LAYOUT_SCRIPT);
-    source = readFileSync(LAYOUT_SCRIPT, 'utf8');
 
     const dom = new JSDOM(PAGE);
     win = dom.window;
     doc = win.document;
 
-    layout.installDownloadGuard(doc, win);
+    layout.installDownloadGuard(doc);
 });
 
 function click(selector) {
@@ -149,46 +146,163 @@ describe('点击真的被吃掉了', () => {
 });
 
 
-describe('留给以后的口子', () => {
+// 当前挂着的那个菜单。没有就是 null。
+function menu() {
+    const item = doc.querySelector('.' + layout.DOWNLOAD_ITEM_CLASS);
+    return item ? item.parentNode : null;
+}
 
-    test('拦下来的时候会喊一声', () => {
+// 菜单里那几项的文案，按顺序。
+function items() {
+    const node = menu();
+    return node ? Array.from(node.children).map(el => el.textContent) : [];
+}
 
-        // 目前没有任何 UI 反馈，日志就是唯一的线索。
-        assert.match(
-            source,
-            /fbDownloadHook/,
-            '源码里找不到 fbDownloadHook，口子没留'
+
+describe('点一下出菜单', () => {
+
+    // 每个用例都从「菜单关着」开始，跑完再关一次 —— 菜单是挂在 body 上的
+    // 真节点，上一个用例留着的会被下一个用例的 querySelector 捞到。
+    afterEach(() => {
+        click('.submit-btn');
+    });
+
+    test('点在图标上也能弹出来 —— 认的是祖先', () => {
+
+        // 粉笔的图标是 svg + path，event.target 是那个 path。
+        click('path.download-icon-fill');
+
+        assert.deepEqual(
+            items(),
+            ['题目成册', '题目脱库'],
+            '点了下载按钮没出菜单，或者菜单里不是这两项'
         );
     });
 
-    test('fbDownloadHook 塞了函数就调它，参数是按钮本身', () => {
 
-        const seen = [];
-        win.fbDownloadHook = element => seen.push(element.tagName);
+    test('菜单项自己不能被当成下载按钮', () => {
+
+        // 菜单挂在 body 上而不是按钮里，就是为了这个。挂进去的话，点菜单项
+        // 那一下的 target 落在 app-download 里，会被守卫当成「又点了一次
+        // 下载」吃掉 —— 表现是点「题目脱库」什么都不会发生，而且不报错。
+        click('path.download-icon-fill');
+
+        const item = doc.querySelector('.' + layout.DOWNLOAD_ITEM_CLASS);
+
+        assert.equal(
+            layout.isDownloadMenuItem(item),
+            true,
+            '菜单项没被认出来，点下去不会触发任何事'
+        );
+
+        assert.equal(
+            layout.isDownloadTarget(item),
+            false,
+            '菜单项被认成了下载按钮 —— 它挂在 body 上才对'
+        );
+    });
+
+
+    test('点页面别处，菜单收回去', () => {
 
         click('path.download-icon-fill');
 
-        assert.deepEqual(seen, ['APP-DOWNLOAD']);
+        assert.ok(menu(), '前提就没成立：菜单没弹出来');
+
+        click('.submit-btn');
+
+        assert.equal(menu(), null, '点了别处菜单还杵在那儿');
     });
 
-    test('钩子里抛错不能连累页面', () => {
 
-        win.fbDownloadHook = () => {
-            throw new Error('故意炸的');
+    test('Esc 也能收', () => {
+
+        click('path.download-icon-fill');
+
+        doc.dispatchEvent(
+            new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+        );
+
+        assert.equal(menu(), null, 'Esc 关不掉菜单');
+    });
+});
+
+
+describe('「题目成册」把点击还给粉笔', () => {
+
+    // 这一整块验的是一件很别扭的事：我们的守卫挂在 document 捕获阶段，
+    // 拦得比粉笔还早，所以「按一下原功能」只能是举旗子 + 重放点击。
+    // 重放要是也被自己拦住，表现就是菜单点了没反应 —— 而且不报错。
+
+    function clickItem(label) {
+
+        const fired = [];
+
+        /*
+         * 只记落在下载按钮上的事件。
+         *
+         * 不能靠「先清空数组」把点菜单那一下滤掉 —— 重放是同步发生的，
+         * 就在点菜单这一下**里面**，中间没有可以插手的缝。
+         */
+        const capture = event => {
+            if (layout.isDownloadTarget(event.target)) fired.push('capture');
         };
 
-        assert.doesNotThrow(() => click('path.download-icon-fill'));
+        const bubble = event => {
+            if (layout.isDownloadTarget(event.target)) fired.push('bubble');
+        };
 
-        win.fbDownloadHook = null;
+        doc.addEventListener('click', capture, true);
+        doc.addEventListener('click', bubble);
+
+        click('path.download-icon-fill');
+
+        const item = Array.from(
+            doc.querySelectorAll('.' + layout.DOWNLOAD_ITEM_CLASS)
+        ).find(el => el.textContent === label);
+
+        item.dispatchEvent(
+            new win.MouseEvent('click', { bubbles: true, cancelable: true })
+        );
+
+        doc.removeEventListener('click', capture, true);
+        doc.removeEventListener('click', bubble);
+
+        return fired;
+    }
+
+
+    test('重放的那一下，粉笔那边的监听收得到', () => {
+
+        assert.deepEqual(
+            clickItem('题目成册'),
+            ['capture', 'bubble'],
+            '重放的点击被自己的守卫拦住了 —— 点了「题目成册」什么都不会发生'
+        );
     });
 
-    test('没塞函数（或者塞了不是函数的）也不炸', () => {
 
-        win.fbDownloadHook = '不是函数';
+    test('放行只限重放那一下，之后立刻收回来', () => {
 
-        assert.doesNotThrow(() => click('path.download-icon-fill'));
+        // 旗子忘了复位的话，从此以后点下载按钮会直接触发粉笔的下载，
+        // 菜单再也不弹了。
+        clickItem('题目成册');
 
-        win.fbDownloadHook = null;
+        click('path.download-icon-fill');
+
+        assert.deepEqual(
+            items(),
+            ['题目成册', '题目脱库'],
+            '重放之后旗子没收回来，下载按钮再也不弹菜单了'
+        );
+    });
+
+
+    test('菜单点完就收 —— 不留一个挂在页面上的空壳', () => {
+
+        clickItem('题目成册');
+
+        assert.equal(menu(), null, '点了菜单项之后菜单还留着');
     });
 });
 
