@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.6
+// @version      2.8
 // @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -25,7 +25,7 @@
     // 这个坑真踩过，踩在隔壁的侧边栏上：加了「询问 AI」一整条链路却没动
     // 版本号，日志和旧版一字不差，于是「点了没反应」到底是旧版没这功能、
     // 还是新版坏了，从页面上完全看不出来。这份脚本当时是漏网的 —— 现在补上。
-    const VERSION = '2.6';
+    const VERSION = '2.8';
 
 
     // =========================================================
@@ -48,7 +48,13 @@
         //
         // 答题卡钉在右上角，它占掉的横向空间是从答题区里扣掉的（见下面的
         // RIGHT_RESERVE），所以改这一个数就够了，不用再去别处同步。
-        cardWidth: 220,
+        //
+        // 这个数和 .fbac-body 的内边距是一对，不能单独动：题号区实宽 =
+        // 本值 - 2（面板边框）- 内边距 * 2，而实宽决定一行几个题号。
+        // 240 / 16px 这一组算出来是 206px，正好还是 5 列。想再加内边距
+        // 就得把这个数一起往上加，否则默认列数会从 5 掉到 4。
+        // test/card.test.mjs 里有一条断言把这两个数绑在一起。
+        cardWidth: 240,
 
         // =====================================================
 
@@ -86,11 +92,22 @@
         //
         // 必须和 fenbi-ai-sidebar.user.js 的 CONFIG.zIndex 相等，有测试盯着。
         //
-        // 这个数**不能调高**：粉笔「暂停答题」的遮罩在它之上，两个助手因此
-        // 会被一起盖住 —— 这是要的效果，遮罩是模态的，浮在它上面的东西看着
-        // 就是穿帮。原先答题卡是 2147483646，比 AI 面板高一点点，于是遮罩
-        // 盖住了面板、盖不住答题卡：两块并排的悬浮物，一块暗了一块还亮着。
-        zIndex: 2147483000,
+        // 这个数要夹在粉笔自己的**内容层和模态层之间**：
+        //
+        //   500  —— 粉笔页面元素里最高的那个（--z-index-footer）
+        //   900  —— 我们
+        //   1000 —— 粉笔「暂停答题」的遮罩（DIV.modal-overlay，盖满屏幕、
+        //           半透明黑）
+        //
+        // 比 500 低，答题卡会被页脚之类的东西压住；比 1000 高，暂停时就会
+        // 浮在遮罩上面 —— 遮罩是模态的，浮在它上面的东西看着就是穿帮。
+        //
+        // 原先这里是 2147483646，比遮罩高了一截，于是「暂停答题」盖住了 AI
+        // 面板、盖不住答题卡。当时误判成「两个助手差一位数」，把两边调成同
+        // 一个数就以为修好了 —— 其实真正的原因是侧边栏的宿主元素没有
+        // z-index（见 fenbi-ai-sidebar.user.js 里那段注释），两个数根本不在
+        // 一个档上，比不了。
+        zIndex: 900,
 
         // Observer 延迟
         observerDelay: 150,
@@ -196,7 +213,6 @@
     const COUNT_LIST_SELECTOR =
         '.customize-question-content .question-mode-count';
 
-    const CUSTOM_COUNT_CLASS = 'fb-count-custom';
     const CUSTOM_COUNT_INPUT_CLASS = 'fb-count-input';
 
     // 出题数量的上下界。
@@ -221,6 +237,12 @@
     let customCard = null;
     let observerTimer = null;
     let layoutTimer = null;
+
+    // 答题卡收起来时带的类。
+    //
+    // 名字跟卡片自己那套 fbac-* 一致。CSS 里那条 .fbac-hidden 必须带
+    // !important，理由写在那边。
+    const CARD_HIDDEN_CLASS = 'fbac-hidden';
 
     /*
      * 接口缓存：globalId -> solution 对象。
@@ -1378,6 +1400,27 @@
 
 
             /*
+             * 没题目的时候整张卡收掉。
+             *
+             * 这个 !important 不是顺手加的，是这条功能的命门：上面
+             * #fenbi-custom-answer-card 那条把 display 钉成了
+             * flex !important。CSS 先比重要性、再比特异性，所以一条不带
+             * important 的类选择器根本盖不住它 —— 表现是「隐藏类加上了，
+             * 卡片照样杵在那儿」，而且一点报错都没有。测试里专门有一条
+             * 盯着这个感叹号。
+             *
+             * 用类而不是往 style 里写 display：露出来的时候把内联样式撤掉
+             * 就行，flex 这个值仍旧只由上面那一条说了算，不会多出第二处
+             * 定义。
+             */
+            #fenbi-custom-answer-card.fbac-hidden {
+
+                display:
+                    none !important;
+            }
+
+
+            /*
              * 原生答题卡移出屏幕。
              *
              * 不删除它，
@@ -1520,7 +1563,13 @@
             #fenbi-custom-answer-card
             .fbac-body {
 
-                padding: 11px !important;
+                /*
+                 * 内边距和 cardWidth 是一对：这一层是题号区外面那圈留白，
+                 * 加它就等于减题号区实宽，也就是减列数。16px 是配着 240px
+                 * 的卡宽来的，两个一起改才保得住默认的 5 列。
+                 */
+
+                padding: 16px !important;
 
                 box-sizing: border-box !important;
 
@@ -3282,6 +3331,50 @@
     }
 
 
+    /*
+     * 答题卡露脸还是收起来。
+     *
+     * 判据是「粉笔的题号按钮有几个」—— 这张卡要显示的就是那些题号，一个
+     * 都没有就等于没数据：要么题还没加载出来，要么这一页压根不是答题页
+     * （目录、解析、首页之类）。空卡上只剩「0/0」「共 0 题」，白占一块
+     * 地方，还压着底下的页面。
+     *
+     * 返回这一下是不是**刚从藏变成露**。藏用的是 display: none，没有盒子
+     * 就量不到宽度，computeColumns 会把 0 宽兜成 1 列 —— 所以从藏变露那
+     * 一次，调用方必须重量一遍宽度（见 updateCustomCard），否则卡片会以
+     * 1 列的样子闪一下才跳回去。
+     */
+    function applyCardVisibility(card, buttons) {
+
+        if (!card) {
+            return false;
+        }
+
+
+        const visible =
+            Boolean(buttons) && buttons.length > 0;
+
+
+        /*
+         * 状态没变就别碰 DOM。这是热路径，每轮 mutation 都会走到，无条件
+         * 写 classList 等于自己给自己再造一轮 —— 这份脚本被那个自我触发
+         * 的循环咬过。
+         */
+        if (
+            card.classList.contains(CARD_HIDDEN_CLASS) ===
+            !visible
+        ) {
+            return false;
+        }
+
+
+        card.classList.toggle(CARD_HIDDEN_CLASS, !visible);
+
+
+        return visible;
+    }
+
+
     function createCustomCard() {
 
         const existing =
@@ -3304,6 +3397,16 @@
 
         customCard.id =
             'fenbi-custom-answer-card';
+
+
+        /*
+         * 先藏起来再上屏。
+         *
+         * 建出来就露着、等下一轮 updateCustomCard 再收的话，没题目的页面上
+         * 会先闪一下写着「0/0 / 共 0 题」的空卡 —— 正好是这次要消掉的东西。
+         * 露不露由 updateCustomCard 说了算，它手里才有题号。
+         */
+        customCard.classList.add(CARD_HIDDEN_CLASS);
 
 
         customCard.innerHTML = `
@@ -3427,8 +3530,31 @@
         const currentText = qs('.fbac-current', customCard);
 
 
+        const justShown =
+            applyCardVisibility(customCard, nativeButtons);
+
+
+        /*
+         * 刚从藏变露，重量一遍宽度。
+         *
+         * 藏着的这段时间 display: none 没有盒子，量出来是 0 宽，
+         * computeColumns 把 0 兜成 1 列。不重量的话，卡片会先以 1 列的样子
+         * 画出来，等 ResizeObserver 下一轮回调才跳回 5 列 —— 一眼能看见的闪。
+         *
+         * getBoundingClientRect 会强制同步布局，所以这里量到的已经是换成
+         * flex 之后的真宽度，不用等下一帧。
+         */
+        if (justShown) {
+            syncCardColumns();
+        }
+
+
         if (!nativeButtons.length) {
 
+            /*
+             * 卡片这会儿已经收起来了，下面这些只是把它归零 —— 免得下次
+             * 露出来的时候先闪一下上一页的旧数字。
+             */
             if (grid.childElementCount) {
                 grid.innerHTML = '';
             }
@@ -3705,16 +3831,29 @@
     }
 
 
-    function buildCustomCountOption(list) {
+    /*
+     * 把出题数量那一组的第一个预设（就是「5」）让给一个输入框。
+     *
+     * 早先的做法是往末尾再接一个 <li>，凑成第 9 格 —— 八个小方块那一行本来
+     * 就满了，第 9 个把行撑爆，和旁边那几个方块放一起一眼就是硬塞的。改成
+     * 顶掉第一格，一行还是八格，看着仍然是粉笔自己的东西。
+     *
+     * 代价是「5」这个预设没了，要 5 道得自己敲。10 到 40 都不动。
+     *
+     * 那个 <a> 是 **藏起来**，不是删掉：它是 Angular *ngFor 渲染出来的，
+     * 身上挂着粉笔自己的点击监听，从人家的清单里挖掉一个节点，下一轮重建
+     * 时对不上。留着它、只是不显示，粉笔那边完全不知道自己少了一格。
+     */
+    function installCustomCount(list) {
 
         if (!list) {
             return null;
         }
 
 
-        // 模态框会被反复重建，自己先去重，别插出第二项
+        // 模态框是会被反复重建的，自己先去重，别装出第二个
         const existing = list.querySelector(
-            '.' + CUSTOM_COUNT_CLASS
+            '.' + CUSTOM_COUNT_INPUT_CLASS
         );
 
 
@@ -3723,17 +3862,21 @@
         }
 
 
+        const first = list.querySelector('a.select-button');
+
+
+        // 结构变了，找不到预设按钮 —— 宁可不做，也别往空列表里塞东西
+        if (!first || !first.parentElement) {
+            return null;
+        }
+
+
         const doc = list.ownerDocument;
 
 
-        const item = doc.createElement('li');
-
-        item.className = CUSTOM_COUNT_CLASS;
-
-
         /*
-         * 带上粉笔自己的 class，长得才和旁边四项是一伙的 ——
-         * 自己描一套颜色边框，它换主题时这一项就会突兀地亮着。
+         * 带上粉笔自己的 class，长得才和旁边几个是一伙的 ——
+         * 自己描一套颜色边框，它换主题时这一格就会突兀地亮着。
          */
         const input = doc.createElement('input');
 
@@ -3759,12 +3902,16 @@
         );
 
 
-        item.appendChild(input);
+        first.style.display = 'none';
 
-        list.appendChild(item);
+        first.setAttribute('aria-hidden', 'true');
 
 
-        return item;
+        // 放进「5」原来那个 <li> 里，位置就还是第一格
+        first.parentElement.appendChild(input);
+
+
+        return input;
     }
 
 
@@ -4150,7 +4297,7 @@
         }
 
 
-        if (!buildCustomCountOption(list)) {
+        if (!installCustomCount(list)) {
             return;
         }
 
@@ -4455,12 +4602,18 @@
             installDownloadGuard: installDownloadGuard,
             DOWNLOAD_SELECTOR: DOWNLOAD_SELECTOR,
 
+            // 没题目就把答题卡收起来。判定和切换是同一件事（要区分
+            // 「刚露出来」和「一直露着」，后者不该重量宽度），所以只出
+            // 这一个口子。
+            applyCardVisibility: applyCardVisibility,
+            CARD_HIDDEN_CLASS: CARD_HIDDEN_CLASS,
+
             // 自定义刷题：任意出题数量
             parseCustomCount: parseCustomCount,
             isCatalogPage: isCatalogPage,
-            buildCustomCountOption: buildCustomCountOption,
+            installCustomCount: installCustomCount,
 
-            CUSTOM_COUNT_CLASS: CUSTOM_COUNT_CLASS,
+            CUSTOM_COUNT_INPUT_CLASS: CUSTOM_COUNT_INPUT_CLASS,
             COUNT_LIST_SELECTOR: COUNT_LIST_SELECTOR,
             MIN_CUSTOM_COUNT: MIN_CUSTOM_COUNT,
             MAX_CUSTOM_COUNT: MAX_CUSTOM_COUNT

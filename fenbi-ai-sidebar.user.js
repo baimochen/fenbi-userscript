@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔背题页 AI 侧边栏
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.2
+// @version      2.3
 // @description  在页面左侧悬浮一块 AI 面板，支持 ChatGPT / Gemini / Claude 等 13 家。所有设置都在油猴菜单里，页面上只留一块 iframe
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -28,7 +28,7 @@
     // 这个坑真踩过：加了「询问 AI」一整条链路却没动版本号，日志还是「2.0
     // 已加载」，于是「没反应」到底是旧版没这个功能、还是新版坏了，从页面上
     // 完全看不出来，白白多绕一轮。
-    const VERSION = '2.2';
+    const VERSION = '2.3';
 
 
     // =========================================================
@@ -66,13 +66,15 @@
         // 层级。
         //
         // 必须和 fenbi-memorize-layout.user.js 的 CONFIG.zIndex 相等，有测试
-        // 盯着。两块悬浮物本来就不该在两个图层上 —— 原先答题卡是
-        // 2147483646、面板是 2147483000，差一点点，于是粉笔「暂停答题」的
-        // 遮罩盖住了面板、盖不住答题卡：并排的两块，一块暗了一块还亮着。
+        // 盯着。这个数要夹在粉笔自己的内容层（500）和模态层（1000，「暂停
+        // 答题」那个盖满屏幕的 DIV.modal-overlay）之间，详细的分档写在布局
+        // 脚本那一段注释里。
         //
-        // 这个数**不能调高**：遮罩在它之上，两个助手因此会被一起盖住，
-        // 这正是要的效果 —— 遮罩是模态的，浮在它上面的东西看着就是穿帮。
-        zIndex: 2147483000,
+        // 注意这个值**同时也写在宿主元素上**（见 buildUi 里给 host 设样式的
+        // 那几行）。光在 .wrap 上写是不够的 —— 宿主是 position: fixed，
+        // 自己就是个层叠上下文，宿主的 z-index 是 auto 的话，.wrap 里写多大
+        // 都在宿主内部打转，整个面板仍然停在 auto 那一档。
+        zIndex: 900,
 
         // 自定义服务地址。
         //
@@ -507,6 +509,25 @@
         // 宿主元素本身也要挡掉继承，Shadow DOM 只隔离选择器，不隔离继承属性
         host.style.cssText =
             'all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0;';
+
+        /*
+         * 宿主自己必须带 z-index，**这一步不能省**。
+         *
+         * position: fixed 本身就会创建一个层叠上下文，所以宿主的 z-index
+         * 决定了整个面板（包括 shadow 里的 .wrap）在页面上排哪一档。宿主
+         * 是 auto 的话，.wrap 里那个再大的数也只是在宿主内部排序 —— 对外
+         * 看，整个面板就是 auto 档的，粉笔的遮罩（z-index 1000）轻轻松松
+         * 压住它。
+         *
+         * 这个坑的代价是一整轮排查：现象是「遮罩盖得住 AI 面板、盖不住答题
+         * 卡」，看着像两个助手的 z-index 差了一位。于是把两边调成同一个数，
+         * 没用 —— 因为一个在 auto 档、一个在正数档，那两个数根本没法比。
+         *
+         * 用 style.zIndex 单独赋值而不是并进上面那串 cssText：cssText 开头
+         * 的 all: initial 会把 z-index 重置成 auto，写在它后面才生效，而
+         * 分开写这一层先后关系一目了然。
+         */
+        host.style.zIndex = String(CONFIG.zIndex);
 
 
         const root =

@@ -6,10 +6,15 @@
 //
 // 另外一半测的是滚动：以前题目一多卡片就一路长到屏幕外面去，底部的页脚
 // 和「当前：N」就看不见了。现在卡片有 max-height，题号那格自己滚。
+//
+// 最后一块测的是显隐：卡片以前不问青红皂白就挂在页面上，目录页、解析页、
+// 首页这种没有题目的地方也杵着一块写着「0/0 / 共 0 题」的空卡。现在没题号
+// 就收起来。
 
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { JSDOM } from 'jsdom';
 import { loadModule, LAYOUT_SCRIPT } from './harness.mjs';
 
 let layout;
@@ -47,14 +52,35 @@ function cssBlock(selector) {
 
 describe('一行几个题号', () => {
 
-    test('宽度不变时，算出来的列数和以前写死的 5 一致', () => {
+    test('默认卡宽下还是 5 列', () => {
 
-        // 220px 的卡：减去面板 1px 边框两侧、body 11px 内边距两侧，题号区
-        // 实宽 196px。这条是防回归的锚点 —— 算法换了但视觉该纹丝不动。
+        // 240px 的卡：减去面板 1px 边框两侧、body 16px 内边距两侧，题号区
+        // 实宽 206px。这条是防回归的锚点 —— 内边距和卡宽是一起调的，
+        // 目的是让留白变大而列数纹丝不动，谁再单独动其中一个都会撞到这儿。
+        //
+        // 反过来说：内边距只要超过 16px（或者卡宽掉回 220px），这里就会
+        // 变成 4 列。所以这两个数是一对，不能拆开改。
         assert.equal(
-            layout.computeColumns(196, layout.CONFIG.minCellWidth, layout.CONFIG.gridGap),
+            layout.computeColumns(206, layout.CONFIG.minCellWidth, layout.CONFIG.gridGap),
             5,
             '默认卡宽下的列数变了，答题卡的样子跟着变，这是没打算发生的'
+        );
+    });
+
+    test('题号区实宽确实是 206 —— 卡宽和内边距得配上', () => {
+
+        // 上面那条锚的是 206 这个数，但它得真的由 cardWidth 和内边距推出来，
+        // 否则改了 CONFIG 而锚点还绿着，等于没盯着。
+        assert.equal(
+            layout.CONFIG.cardWidth - 2 - 16 * 2,
+            206,
+            'cardWidth 或内边距动过了，上面那条锚点的 206 已经不是真的了'
+        );
+
+        assert.match(
+            cssBlock('.fbac-body {'),
+            /padding:\s*16px/,
+            '.fbac-body 的内边距不是 16px —— 上面那条算式里的 16 就成了一句谎话'
         );
     });
 
@@ -249,5 +275,147 @@ describe('题目多了要滚', () => {
                 selector + ' 没有 flex: 0 0 auto，会被题号区挤扁'
             );
         }
+    });
+});
+
+
+describe('没题目就别显示', () => {
+
+    // 这张卡在显隐这件事上只有一个可观察的状态：带没带那个隐藏类。
+    // 所以这里拿一个空壳 <div> 顶上就行 —— 真卡片那套壳是 createCustomCard
+    // 拼的，跟「该不该露脸」这条规则没关系，混在一起只会让失败信息变糊。
+    const dom = new JSDOM('<div id="fenbi-custom-answer-card"></div>');
+    const doc = dom.window.document;
+
+    function makeCard() {
+        return doc.createElement('div');
+    }
+
+    function buttons(count) {
+        return Array.from(
+            { length: count },
+            () => doc.createElement('button')
+        );
+    }
+
+    function hidden(card) {
+        return card.classList.contains(layout.CARD_HIDDEN_CLASS);
+    }
+
+
+    test('一个题号都没有 —— 收起来', () => {
+
+        const card = makeCard();
+
+        assert.equal(
+            layout.applyCardVisibility(card, []),
+            false,
+            '收起来不算「刚露出来」，回报 true 会让调用方白量一次宽度'
+        );
+
+        assert.ok(hidden(card), '没题目的时候卡片还挂在页面上');
+    });
+
+
+    test('有题号 —— 露出来，并回报「这一下刚露出来」', () => {
+
+        const card = makeCard();
+
+        layout.applyCardVisibility(card, []);
+
+        assert.equal(
+            layout.applyCardVisibility(card, buttons(3)),
+            true,
+            '从藏变露那一次没回报 true，调用方就不会重量宽度'
+        );
+
+        assert.equal(hidden(card), false, '有题目了卡片还藏着');
+    });
+
+
+    test('已经是露的，再报一次不重复写 DOM', () => {
+
+        // updateCustomCard 是热路径，每轮 mutation 都要走到这儿。无条件写
+        // classList 等于自己给自己再造一轮 mutation —— 这份脚本被那个
+        // 自我触发的循环咬过一次，代价是一整轮排查。
+        const card = makeCard();
+
+        layout.applyCardVisibility(card, buttons(1));
+
+        assert.equal(
+            layout.applyCardVisibility(card, buttons(1)),
+            false,
+            '状态没变却回报「刚露出来」，每轮都会白量一次宽度'
+        );
+    });
+
+
+    test('题目没了再收回去', () => {
+
+        const card = makeCard();
+
+        layout.applyCardVisibility(card, buttons(2));
+
+        assert.equal(layout.applyCardVisibility(card, []), false);
+
+        assert.ok(hidden(card), '切到没有题目的页面之后卡片还留着');
+    });
+
+
+    test('卡片还没建出来（null）也不炸', () => {
+
+        assert.equal(layout.applyCardVisibility(null, buttons(1)), false);
+        assert.equal(layout.applyCardVisibility(null, []), false);
+    });
+
+
+    test('隐藏规则必须带 !important', () => {
+
+        // #fenbi-custom-answer-card 那条把 display 钉成了 flex !important。
+        // CSS 先比重要性、再比特异性，所以一条不带 important 的类选择器
+        // 根本盖不住它 —— 表现是「隐藏类加上了，卡片照样在」，而且一点
+        // 报错都没有。这个感叹号就是这条功能的命门。
+        assert.match(
+            cssBlock('#fenbi-custom-answer-card.fbac-hidden {'),
+            /display:\s*none\s*!important/,
+            '.fbac-hidden 不是 display: none !important，压不住卡片的 flex'
+        );
+    });
+
+
+    test('卡片一建出来就是藏的，没数据的页面不会闪一下「0/0」', () => {
+
+        // 建出来先露着、等下一轮 updateCustomCard 再收，页面上会闪一下
+        // 写着「0/0 / 共 0 题」的空卡。
+        assert.match(
+            source,
+            /customCard\.classList\.add\(\s*CARD_HIDDEN_CLASS\s*\)/,
+            'createCustomCard 没先把卡片藏起来'
+        );
+    });
+
+
+    test('显隐是热路径在管，不是只在初始化时判一次', () => {
+
+        // 粉笔是单页应用：从答题页点回目录页，卡片得跟着收起来。只在
+        // init 里判一次的话，走路由切换这条路就漏了。
+        assert.match(
+            source,
+            /function updateCustomCard\(\)[\s\S]*?applyCardVisibility\(/,
+            'updateCustomCard 里没调 applyCardVisibility，路由一切换就不灵了'
+        );
+    });
+
+
+    test('从藏变露那一次重量宽度 —— 否则会以 1 列闪一下', () => {
+
+        // display: none 没有盒子，量出来是 0 宽，computeColumns 把 0 宽
+        // 兜成 1 列。不重量的话，卡片会先以 1 列的样子画出来，等
+        // ResizeObserver 下一轮回调才跳回 5 列。
+        assert.match(
+            source,
+            /if \(justShown\) \{\s*syncCardColumns\(\);/,
+            'updateCustomCard 露出来那一次没有重量宽度'
+        );
     });
 });

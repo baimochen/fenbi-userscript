@@ -3,8 +3,8 @@
 // 这件事只在目录页的模态框里干，所以有三层要分开验：
 //
 //   1. 这个数本身合不合法（纯函数，最该测厚的一层）
-//   2. 页面路径对不对（别在背题页也去插一个输入框）
-//   3. 插进 DOM 的样子（插哪儿、插几次、有没有输入框）
+//   2. 页面路径对不对（别在背题页也去动那个模态框）
+//   3. 装进 DOM 的样子（落在哪一格、装几次、「5」怎么了）
 //
 // 值的合法性值得写这么多条，是因为它挡的是一个很具体的场景：用户随手敲
 // 了个 0 或者负号，或者全角输入法打出来的数字。这种值一旦漏进去，粉笔那边
@@ -159,34 +159,109 @@ describe('只在目录页干活', () => {
 });
 
 
-describe('插进模态框里那一项', () => {
+describe('把「5」那一格换成输入框', () => {
 
-    test('插在出题数量那一组里，末尾', () => {
+    function install(doc) {
+        return layout.installCustomCount(
+            doc.querySelector(layout.COUNT_LIST_SELECTOR)
+        );
+    }
 
+    test('那一组还是四项，不多长出一格', () => {
+
+        // 早先是往末尾再插一个 <li>，凑成第 9 格。八个小方块那一行本来就
+        // 满了，第 9 个把行撑爆，看着就不像原生的。
         const doc = modal();
         const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
 
         assert.ok(list, '测试夹具里就找不到出题数量那一组，选择器是错的');
 
-        const option = layout.buildCustomCountOption(list);
+        install(doc);
 
         assert.equal(
-            list.lastElementChild,
-            option,
-            '没插在末尾 —— 插到中间去会把「不限 / 近3年」那几组的位置也顶乱'
+            list.children.length,
+            4,
+            '多长出了一格 —— 那一行会被撑满或者换行'
         );
-
-        assert.equal(list.children.length, 5, '原来的四项应该还在');
     });
 
-    test('里面有个能输数字的输入框', () => {
+    test('输入框落在第一格里，也就是「5」原来的位置', () => {
 
         const doc = modal();
-        const option = layout.buildCustomCountOption(doc.querySelector(layout.COUNT_LIST_SELECTOR));
+        const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
 
-        const input = option.querySelector('input');
+        const input = install(doc);
 
-        assert.ok(input, '插进去的那一项里没有输入框');
+        assert.ok(input, '没装出输入框');
+        assert.equal(
+            input.closest('li'),
+            list.firstElementChild,
+            '输入框没落在第一格，那一行看着会错位'
+        );
+    });
+
+    test('「5」被藏起来，把位置让出来', () => {
+
+        const doc = modal();
+        const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
+        const five = list.querySelector('a');
+
+        assert.equal(
+            five.textContent.trim(),
+            '5',
+            '夹具的第一个按钮不是 5，下面这条断言就失去意义了'
+        );
+
+        install(doc);
+
+        assert.equal(
+            five.style.display,
+            'none',
+            '「5」还露着，会和输入框挤在同一格里'
+        );
+    });
+
+    test('是藏起来，不是从 DOM 里删掉', () => {
+
+        // 那个 <a> 是 Angular *ngFor 渲染的，还挂着它的点击监听。
+        // 删掉等于在人家的清单里挖个洞，下一轮重建时可能对不上。
+        const doc = modal();
+        const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
+        const before = list.querySelectorAll('a').length;
+
+        install(doc);
+
+        assert.equal(
+            list.querySelectorAll('a').length,
+            before,
+            'Angular 渲染出来的节点被删了'
+        );
+    });
+
+    test('别的预设一个不动 —— 10 到 40 照旧', () => {
+
+        const doc = modal();
+        const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
+
+        install(doc);
+
+        const shown = [...list.querySelectorAll('a')]
+            .filter(node => node.style.display !== 'none')
+            .map(node => node.textContent.trim());
+
+        assert.deepEqual(
+            shown,
+            ['10', '20', '40'],
+            '除了让位的「5」，别的预设被动了'
+        );
+    });
+
+    test('里面是个能输数字的输入框', () => {
+
+        const doc = modal();
+        const input = install(doc);
+
+        assert.equal(input.tagName, 'INPUT');
         assert.equal(input.type, 'number');
         assert.equal(input.min, String(layout.MIN_CUSTOM_COUNT));
         assert.equal(input.max, String(layout.MAX_CUSTOM_COUNT));
@@ -194,40 +269,47 @@ describe('插进模态框里那一项', () => {
 
     test('借用粉笔自己的 class，长得才像一伙的', () => {
 
-        // 自己描一套颜色边框，粉笔换主题（暗色模式）时这一项就会突兀地
-        // 亮着。用它的 class，它的 CSS 会管这一项。
+        // 自己描一套颜色边框，粉笔换主题（暗色模式）时这一格就会突兀地
+        // 亮着。用它的 class，它的 CSS 会管这一格。
         const doc = modal();
-        const option = layout.buildCustomCountOption(doc.querySelector(layout.COUNT_LIST_SELECTOR));
 
         assert.ok(
-            option.querySelector('.select-button'),
-            '没带 .select-button，样式会跟旁边四项对不上'
+            install(doc).classList.contains('select-button'),
+            '没带 .select-button，样式会跟旁边几个对不上'
         );
     });
 
-    test('重复调用不会插出第二项', () => {
+    test('重复调用不会装出第二个输入框', () => {
 
         const doc = modal();
         const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
 
-        layout.buildCustomCountOption(list);
-        layout.buildCustomCountOption(list);
+        install(doc);
+        install(doc);
 
         assert.equal(
-            list.querySelectorAll('.' + layout.CUSTOM_COUNT_CLASS).length,
+            list.querySelectorAll('.' + layout.CUSTOM_COUNT_INPUT_CLASS).length,
             1,
-            '插了两项 —— 模态框是会被反复重建的，这里必须自己去重'
+            '装了两个 —— 模态框是会被反复重建的，这里必须自己去重'
         );
     });
 
     test('列表压根不存在时给个 null，不炸', () => {
 
-        const doc = modal();
-
         assert.equal(
-            layout.buildCustomCountOption(doc.querySelector('.不存在的组')),
+            layout.installCustomCount(modal().querySelector('.不存在的组')),
             null
         );
+    });
+
+    test('那一组里一个预设按钮都没有时也给个 null，不炸', () => {
+
+        const doc = modal();
+        const list = doc.querySelector(layout.COUNT_LIST_SELECTOR);
+
+        list.innerHTML = '';
+
+        assert.equal(layout.installCustomCount(list), null);
     });
 });
 
