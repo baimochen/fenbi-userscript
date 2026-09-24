@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.13
+// @version      2.14
 // @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -25,7 +25,7 @@
     // 这个坑真踩过，踩在隔壁的侧边栏上：加了「询问 AI」一整条链路却没动
     // 版本号，日志和旧版一字不差，于是「点了没反应」到底是旧版没这功能、
     // 还是新版坏了，从页面上完全看不出来。这份脚本当时是漏网的 —— 现在补上。
-    const VERSION = '2.13';
+    const VERSION = '2.14';
 
 
     // =========================================================
@@ -35,35 +35,64 @@
     const CONFIG = {
 
         // =====================================================
-        // 宽度 —— 要调就调这两个
+        // 三栏宽度 —— 要调就调这两个
+        //
+        // 屏幕横向切成三栏：AI 面板 | 答题区 | 答题卡。前两栏按下面的
+        // **百分比**走，答题区吃剩下的那份。
+        //
+        // 没有第三个数。写出来就有三份数，改两个忘一个的时候谁也不知道
+        // 该信哪个 —— 答题区 = 100 - ai - card。
+        //
+        // 百分比相对的是视口（两块悬浮物是 position: fixed，答题区那个
+        // 包含块也铺满视口），所以同一个比例在整个屏幕上都成立。以前写死
+        // px 的时候不是这样：380px 在 1920 上占两成，在 1280 上占三成，
+        // 「占多宽」是跟着屏幕悄悄变的。
         // =====================================================
 
-        // 答题区（题干 + 选项）的宽度上限。
+        // AI 面板那一栏。
         //
-        // 屏幕不够宽的时候会自动缩，不会溢出去。想让题目排得舒展就往上加，
-        // 想让它窄一点、眼睛少走些路就往下减。
-        questionMaxWidth: 900,
+        // 必须和 fenbi-ai-sidebar.user.js 的 CONFIG.panelPercent 相等，有
+        // 测试盯着 —— 两个脚本各在一份油猴沙箱里，看不到对方的数，而这个
+        // 数一旦对不上，答题区让出来的地方就装不下那块面板。
+        aiPercent: 22,
 
-        // 答题卡的宽度。
+        // 答题卡那一栏。
         //
-        // 答题卡钉在右上角，它占掉的横向空间是从答题区里扣掉的（见下面的
-        // RIGHT_RESERVE），所以改这一个数就够了，不用再去别处同步。
+        // 卡宽不再和 .fbac-body 的内边距绑死了：一行几个题号是按卡片的
+        // **实测宽度**算的（syncCardColumns 用 ResizeObserver 量 border
+        // box），卡宽一变列数自己就跟着变。所以这里放宽放宽都不会把
+        // 题号挤成一条 —— 那件事现在有别的机制管。
+        cardPercent: 15,
+
+        // -----------------------------------------------------
+        // 两栏各自的下限。百分比掉到这以下就改用这个宽度。
         //
-        // 这个数和 .fbac-body 的内边距是一对，不能单独动：题号区实宽 =
-        // 本值 - 2（面板边框）- 内边距 * 2，而实宽决定一行几个题号。
-        // 256 / 24px 这一组算出来是 206px，正好还是 5 列。想再加内边距
-        // 就得把这个数一起往上加，否则默认列数会从 5 掉到 4。
-        // test/card.test.mjs 里有一条断言把这两个数绑在一起。
+        // 不设的话，900px 的屏上答题卡只有 135px，减掉四周留白只剩
+        // 87px，题号会挤成一列 —— 名义上「按占比」了，实际上不能用。
+        // 拿到下限的屏幕上是真的排不下三栏，只能让它们各占各的最小值。
         //
-        // 实宽从 220px 那版起一直是 206，两次加留白都是「卡宽加多少、
-        // 内边距就吃多少」—— 变的只有那圈留白，格子和列数一次都没动过。
-        cardWidth: 256,
+        // 答题区让出来的地方用的是**同一个 max() 表达式**（见下面的
+        // QUESTION_INSET_*），所以下限一触发，三栏也还是一起动的，
+        // 不会出现「面板还按 22% 缩、答题区却按上限让位」那种错位。
+        // -----------------------------------------------------
+
+        aiMinWidth: 260,
+
+        // 答题卡的下限。180px 减掉四周留白是 130px，三列 ——
+        // 再往下就只剩一两列了，那时候卡片已经不像一张卡。
+        cardMinWidth: 180,
 
         // =====================================================
 
         // 答题卡
         cardTop: 65,
+
+        // 答题卡离屏幕右边、以及 AI 面板离屏幕左边各留多少。
+        //
+        // panelLeft 必须和 fenbi-ai-sidebar.user.js 的 CONFIG.panelLeft
+        // 相等，有测试盯着。
         cardRight: 16,
+        panelLeft: 16,
 
         // 答题卡下边缘离屏幕底留多少。
         //
@@ -71,8 +100,13 @@
         // panelBottom，两块悬浮物上下留白才是齐的。
         cardBottom: 16,
 
-        // 答题卡和答题区之间留的空隙。调到 0 两块就贴一起了。
-        cardGap: 14,
+        // 栏与栏之间留的空隙 —— 左边那道（AI 面板 | 答题区）和右边那道
+        // （答题区 | 答题卡）用同一个数。一边宽一边窄看得出来。
+        //
+        // 它同时还在兜一件事：三栏的百分比是相对视口算的，而答题区让位
+        // 用的是它自己包含块的百分比，两个基数差一个滚动条的宽度。这点
+        // 误差就落在这道缝里，不至于让哪两栏真贴上。
+        columnGap: 14,
 
         // 答题卡里每个题号格子的最小宽度。
         //
@@ -133,12 +167,37 @@
     };
 
 
-    // 答题卡占掉的横向空间：右边距 + 卡宽 + 和答题区之间的空隙。
-    //
-    // 算出来而不是写死 —— 写死的话，改了 cardWidth 忘了改它，答题卡就压在
-    // 题目上了。这个坑原来就在，只是没人去动那个数所以没踩到。
-    const RIGHT_RESERVE =
-        CONFIG.cardRight + CONFIG.cardWidth + CONFIG.cardGap;
+    /*
+     * 三栏的几何全在这四个常量里 —— 页面上任何一处用到栏宽都引用它们，
+     * 不再各写一份。
+     *
+     * max() 是「百分比，但不小于下限」：正常屏幕上按占比走，屏幕窄到
+     * 占比不敷用时改用下限。两侧都用同一个表达式，所以下限一触发，
+     * 面板和答题区让位是一起变的 —— 各写各的就会错位。
+     */
+    const AI_COLUMN =
+        `max(${CONFIG.aiPercent}%, ${CONFIG.aiMinWidth}px)`;
+
+    const CARD_COLUMN =
+        `max(${CONFIG.cardPercent}%, ${CONFIG.cardMinWidth}px)`;
+
+
+    /*
+     * 答题区左右各让出来多少。
+     *
+     * 左边 = AI 面板那一栏 + 它离屏幕左边的边距 + 一道栏间空隙，
+     * 右边 = 答题卡那一栏 + 它离屏幕右边的边距 + 一道栏间空隙。
+     *
+     * 让出这些之后答题区的 width 用 auto，剩下的自动就是它的宽度 ——
+     * 不用再写一遍 calc(100% - ...)。那才是原来真正的坑：预留量和实际
+     * 宽度是两条各算各的式子，改了一边就压到题目上（当年那个手写死的
+     * rightReserve: 250 就是这么来的）。
+     */
+    const QUESTION_INSET_LEFT =
+        `calc(${AI_COLUMN} + ${CONFIG.panelLeft}px + ${CONFIG.columnGap}px)`;
+
+    const QUESTION_INSET_RIGHT =
+        `calc(${CARD_COLUMN} + ${CONFIG.cardRight}px + ${CONFIG.columnGap}px)`;
 
 
     const PANEL_CLASS = 'fb-sol-panel';
@@ -1181,20 +1240,31 @@
                题目主区域
                ===================================================== */
 
+            /*
+             * 答题区：左右让出 AI 面板和答题卡那两栏，剩下的全归它。
+             *
+             * width: auto 是故意的 —— 让出多少由 margin 说了算，宽度自己
+             * 就是「剩下的那些」。写 calc(100% - ...) 等于把同一件事算两遍，
+             * 两遍就有对不上的那天。
+             *
+             * max-width 必须显式写成 none：粉笔自己在 .memorize-main 上
+             * 有一条 max-width: var(--screen-width)（桌面是 100vw - 260px）。
+             * 我们原来那条 900px 的 !important 把它压着，撤掉之后它就冒
+             * 出来了，宽屏上会莫名其妙地在某处停住。
+             */
+
             html body
             .memorize-main {
 
-                width:
-                    calc(
-                        100% - ${RIGHT_RESERVE}px
-                    ) !important;
+                width: auto !important;
 
-                max-width:
-                    ${CONFIG.questionMaxWidth}px !important;
+                max-width: none !important;
 
-                margin-left: auto !important;
+                margin-left:
+                    ${QUESTION_INSET_LEFT} !important;
 
-                margin-right: auto !important;
+                margin-right:
+                    ${QUESTION_INSET_RIGHT} !important;
 
                 box-sizing: border-box !important;
 
@@ -1479,7 +1549,7 @@
                     ${CONFIG.cardRight}px !important;
 
                 width:
-                    ${CONFIG.cardWidth}px !important;
+                    ${CARD_COLUMN} !important;
 
                 box-sizing:
                     border-box !important;
@@ -1687,13 +1757,17 @@
             .fbac-body {
 
                 /*
-                 * 内边距和 cardWidth 是一对：这一层是题号区外面那圈留白，
-                 * 加它就等于减题号区实宽，也就是减列数。24px 是配着 256px
-                 * 的卡宽来的，两个一起改才保得住默认的 5 列。
+                 * 这一层是题号区外面那圈留白：加它就等于减题号区实宽，
+                 * 也就是减列数。
                  *
-                 * 11 → 16 → 24，卡宽 220 → 240 → 256：两次都是「卡宽加多少、
-                 * 内边距就吃多少」，所以题号区实宽一直是 206px，格子的宽度
-                 * 和一行几个从来没变，变的只有这圈留白。
+                 * 卡宽原来是写死的 256px，两者是一对，24px 配 256px 保住
+                 * 5 列（11 → 16 → 24 和卡宽 220 → 240 → 256 是两次同步
+                 * 调整，题号区实宽一直是 206，变的只有这圈留白）。
+                 *
+                 * 现在卡宽是百分比，不再有「配着哪个卡宽」这回事 ——
+                 * 列数由 syncCardColumns 按实测宽度算。但下限还是得跟这个
+                 * 内边距配得上：cardMinWidth 180 减掉 2px 边框和这 48px
+                 * 是 130px，三列。test/card.test.mjs 盯着这条。
                  */
 
                 padding: 24px !important;
@@ -1984,28 +2058,24 @@
                小屏
                ===================================================== */
 
-            @media (max-width: 1000px) {
-
-                html body
-                .memorize-main {
-
-                    width:
-                        calc(
-                            100% - 220px
-                        ) !important;
-                }
-
-
-                #fenbi-custom-answer-card {
-
-                    width: 195px !important;
-
-                    right: 8px !important;
-                }
-            }
-
+            /*
+             * 中间那一档（≤1000px）没有了。
+             *
+             * 它原来干的事是把答题区让出 220px、把卡压到 195px —— 一对
+             * 手写死的数，跟 CONFIG 里另外两个各说各话（RIGHT_RESERVE 那段
+             * 注释抱怨的就是这个）。现在百分比自己会缩，缩到 aiMinWidth /
+             * cardMinWidth 就不动了，不用再单开一档替它擦屁股。
+             */
 
             @media (max-width: 750px) {
+
+                /*
+                 * 手机：三栏排不下，退回两栏 —— 答题区占满整屏，答题卡浮
+                 * 在它上面。
+                 *
+                 * 手机上这是没办法的事：键盘一收一放就要占掉半屏，横向
+                 * 再切三份只会三方都不能用。
+                 */
 
                 html body
                 .memorize-main {
@@ -2013,6 +2083,10 @@
                     width: 100% !important;
 
                     max-width: 100% !important;
+
+                    margin-left: 0 !important;
+
+                    margin-right: 0 !important;
                 }
 
 
@@ -3114,26 +3188,37 @@
     // 这里只做低频兜底，不进热路径。
     // =========================================================
 
+    /*
+     * 三栏那套几何的兜底。
+     *
+     * 跟上面 CSS 里写的是同一组值 —— 这里重新贴一遍不是抄，是**必须**：
+     * 几何兜底存在的意义就是粉笔自己的样式把我们的压下去了（它的
+     * .memorize-main 有 max-width: var(--screen-width) 和 margin: auto），
+     * 光靠样式表那几条不一定赢，而这几条是内联的 !important。
+     *
+     * 值一律引用常量，不写字面量：哪天比例改了，这里跟着变，不用想起来
+     * 还有第二处。
+     */
     function optimizeQuestionWidth() {
 
         qsa('.memorize-main').forEach(
             main => {
 
+                important(main, 'width', 'auto');
+
+                important(main, 'max-width', 'none');
+
                 important(
                     main,
-                    'width',
-                    `calc(100% - ${RIGHT_RESERVE}px)`
+                    'margin-left',
+                    QUESTION_INSET_LEFT
                 );
 
                 important(
                     main,
-                    'max-width',
-                    `${CONFIG.questionMaxWidth}px`
+                    'margin-right',
+                    QUESTION_INSET_RIGHT
                 );
-
-                important(main, 'margin-left', 'auto');
-
-                important(main, 'margin-right', 'auto');
 
                 important(main, 'box-sizing', 'border-box');
 
@@ -5601,8 +5686,13 @@
             // 盖住一个、盖不住另一个，肉眼看不出原因。
             CONFIG: CONFIG,
 
-            // 同理，宽度那几个数也得能被读出来验
-            RIGHT_RESERVE: RIGHT_RESERVE,
+            // 同理，三栏那套几何也得能被读出来验。侧边栏的测试会拿
+            // AI_COLUMN 跟它自己那份比 —— 那个数对不上，答题区让出来的
+            // 地方就装不下那块面板。
+            AI_COLUMN: AI_COLUMN,
+            CARD_COLUMN: CARD_COLUMN,
+            QUESTION_INSET_LEFT: QUESTION_INSET_LEFT,
+            QUESTION_INSET_RIGHT: QUESTION_INSET_RIGHT,
 
             // 一行几个题号。宽度是个会变的量（媒体查询会压窄卡片），
             // 所以要测的是算式，不是某个固定的列数。

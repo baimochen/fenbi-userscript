@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔背题页 AI 侧边栏
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.3
+// @version      2.4
 // @description  在页面左侧悬浮一块 AI 面板，支持 ChatGPT / Gemini / Claude 等 13 家。所有设置都在油猴菜单里，页面上只留一块 iframe
 // @author       baimochen
 // @match        *://*.fenbi.com/ti/memorize/*
@@ -28,7 +28,7 @@
     // 这个坑真踩过：加了「询问 AI」一整条链路却没动版本号，日志还是「2.0
     // 已加载」，于是「没反应」到底是旧版没这个功能、还是新版坏了，从页面上
     // 完全看不出来，白白多绕一轮。
-    const VERSION = '2.3';
+    const VERSION = '2.4';
 
 
     // =========================================================
@@ -40,15 +40,21 @@
 
     const CONFIG = {
 
-        // 面板宽度。要调就调这一个数。
+        // 面板宽度：屏幕宽度的百分比。
         //
         // 原来面板上有个拖拽条能拉宽，拉出来的宽度会存进偏好里 —— 那个已经
         // 删了，所以这里就是唯一说了算的地方。
         //
-        // 面板是浮在答题区左边的，调宽了会盖住一部分题目。答题区本身多宽由
-        // fenbi-memorize-layout.user.js 的 questionMaxWidth 管，两者互不知道
-        // 对方的存在，配的时候心里有个数。
-        panelWidth: 380,
+        // 必须和 fenbi-memorize-layout.user.js 的 CONFIG.aiPercent 相等，
+        // 有测试盯着。这不是「配的时候心里有个数」那种关系了 —— 答题区
+        // 现在是**照着这个数让位**的（那边把这栏和两边边距一起扣掉），
+        // 两边对不上，面板就会压在题目上或者空出一条。
+        panelPercent: 22,
+
+        // 面板宽度的下限。百分比掉到这以下就改用这个宽度。
+        //
+        // 必须和布局脚本的 CONFIG.aiMinWidth 相等，同上。
+        panelMinWidth: 260,
 
         // 面板上边缘。
         //
@@ -141,6 +147,20 @@
         // 丢掉，不如老实退回剪贴板。以后配了新的就往这儿加。
         autofillServices: ['doubao']
     };
+
+
+    /*
+     * 面板这一栏的宽度。
+     *
+     * 「百分比，但不小于下限」—— 跟布局脚本给答题卡写的是同一个写法
+     * （那边叫 CARD_COLUMN）。正常屏幕上按占比走，屏幕窄到占比不敷用时
+     * 改用下限。
+     *
+     * 布局脚本扣掉答题区左边那块地方时用的是完全一样的表达式，所以两边
+     * 是同一条式子，不是两个碰巧相等的数。
+     */
+    const PANEL_COLUMN =
+        `max(${CONFIG.panelPercent}%, ${CONFIG.panelMinWidth}px)`;
 
 
     // =========================================================
@@ -304,7 +324,7 @@
 
     const STORE_PREFIX = 'fbai.';
 
-    // 宽度不在这里 —— 它只听 CONFIG.panelWidth 的，见上面的说明。
+    // 宽度不在这里 —— 它只听 CONFIG.panelPercent 的，见上面的说明。
     const DEFAULTS = {
 
         // 面板收起来了没有。
@@ -421,7 +441,7 @@
         }
 
         .panel {
-            width: ${CONFIG.panelWidth}px;
+            width: ${PANEL_COLUMN};
             display: flex;
             flex-direction: column;
             background: rgba(255, 255, 255, 0.98);
@@ -880,8 +900,7 @@
             syncTab(hidden);
 
 
-            panel.style.width =
-                CONFIG.panelWidth + 'px';
+            panel.style.width = PANEL_COLUMN;
 
 
             const url =
