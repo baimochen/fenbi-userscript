@@ -282,6 +282,49 @@ describe('「题目成册」把点击还给粉笔', () => {
     });
 
 
+    test('重放落在用户真正点的那个元素上', () => {
+
+        /*
+         * 守卫认的是 closest('app-download')，也就是那个**宿主元素**；
+         * 但真人点的是它里头的图标。这两个不是一回事：
+         *
+         *   事件只沿「派它的那个元素」往上冒。
+         *
+         * 派给宿主的话，传播路径是 document → … → app-download，挂在它
+         * **子孙**上的监听压根不在路径上，一个都不会响。粉笔的下载处理器
+         * 挂在宿主上还是挂在图标上，只有运行时才知道 —— 所以只能照着真人
+         * 的样子，派给他点的那个元素。
+         *
+         * 上面那两条验不出这件事：它们盯的是挂在 document 上的监听，而
+         * document 在两种派法里都在路径上。
+         */
+        const inner = doc.querySelector('.download-inner');
+        const fired = [];
+
+        inner.addEventListener('click', () => fired.push('inner'));
+
+        // 先按真人那样把菜单点开（这一下本身就会经过 inner）
+        click('path.download-icon-fill');
+
+        const item = Array.from(
+            doc.querySelectorAll('.' + layout.DOWNLOAD_ITEM_CLASS)
+        ).find(el => el.textContent === '题目成册');
+
+        // 清在这儿才有用：重放发生在下面这一下**里面**，中间没有缝。
+        fired.length = 0;
+
+        item.dispatchEvent(
+            new win.MouseEvent('click', { bubbles: true, cancelable: true })
+        );
+
+        assert.deepEqual(
+            fired,
+            ['inner'],
+            '重放的事件没经过图标本身 —— 处理器挂在它上面的话，点「题目成册」就是没反应，而且不报错'
+        );
+    });
+
+
     test('放行只限重放那一下，之后立刻收回来', () => {
 
         // 旗子忘了复位的话，从此以后点下载按钮会直接触发粉笔的下载，

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         粉笔刷题/背题页面布局优化
 // @namespace    https://github.com/baimochen/fenbi-userscript
-// @version      2.12
+// @version      2.13
 // @description  粉笔背题页面优化：拦截接口一次取全解析/来源/考点、点选项瞬出、隐藏VIP视频/笔记、限宽 900px、题目与选项卡片化、自制答题卡、解析栏一键复制题目
 // @author       baimochen
 // @match        *://*.fenbi.com/*
@@ -25,7 +25,7 @@
     // 这个坑真踩过，踩在隔壁的侧边栏上：加了「询问 AI」一整条链路却没动
     // 版本号，日志和旧版一字不差，于是「点了没反应」到底是旧版没这功能、
     // 还是新版坏了，从页面上完全看不出来。这份脚本当时是漏网的 —— 现在补上。
-    const VERSION = '2.12';
+    const VERSION = '2.13';
 
 
     // =========================================================
@@ -184,7 +184,7 @@
     //
     // 展开那半句带着「解析」两个字：标题栏最左边原来有个「解析」标题，
     // 删掉之后这层意思只能由按钮自己扛着。
-    const EXPAND_LABEL = '解析和展开 ▾';
+    const EXPAND_LABEL = '展开 ▾';
     const COLLAPSE_LABEL = '收起 ▴';
 
 
@@ -211,12 +211,34 @@
     const ASK_ATTR = 'data-fbai-ask';
     const ASK_RESULT_ATTR = 'data-fbai-ask-result';
 
+    /*
+     * 当前在第几题，写给手柄脚本看。
+     *
+     * 手柄脚本自己没有可靠的「当前题号」—— 它只有 35% 视口那套启发式，
+     * 而猜错的代价很实：答完即锁，点错一道就永久锁掉一道没做过的题。
+     * 这边本来就在算这个（getCurrentQuestionIndex），写出来给它是顺手
+     * 的事。
+     *
+     * 名字必须跟 fenbi-gamepad.user.js 里的那个常量一致。
+     */
+    const CURRENT_QUESTION_ATTR = 'data-fbai-current-question';
+
     // 结果码 -> 按钮上闪的字。侧边栏写码，这边负责说人话。
     const ASK_RESULT_LABELS = {
         sent: '已发送 ✓',
         copied: '已复制 ✓',
         none: '没送出去'
     };
+
+
+    /*
+     * 「这件事成了」的绿。
+     *
+     * 取的是答题卡答对那格的颜色 —— 页面上已经有这么一处绿了，再另起
+     * 一个绿就是两个绿各说各话。所以两边指的是同一个常量，不是各写一份
+     * 恰好相等的字面量：改一处两边一起动，不会偷偷岔开。
+     */
+    const OK_GREEN = '#2ac7a9';
 
 
     // =========================================================
@@ -1038,9 +1060,9 @@
             html body
             .${PANEL_CLASS} .${ASK_CLASS}.fb-copied {
 
-                background: #2c8a4b !important;
+                background: ${OK_GREEN} !important;
 
-                border-color: #2c8a4b !important;
+                border-color: ${OK_GREEN} !important;
 
                 color: #fff !important;
             }
@@ -1761,7 +1783,7 @@
             #fenbi-custom-answer-card
             .fbac-dot-right {
 
-                background: #2ac7a9 !important;
+                background: ${OK_GREEN} !important;
             }
 
 
@@ -1885,9 +1907,9 @@
             #fenbi-custom-answer-card
             .fbac-question.is-right {
 
-                background: #2ac7a9 !important;
+                background: ${OK_GREEN} !important;
 
-                border-color: #2ac7a9 !important;
+                border-color: ${OK_GREEN} !important;
 
                 color: #fff !important;
             }
@@ -3510,6 +3532,33 @@
     }
 
 
+    /*
+     * 顺手把手柄脚本要的题号写出去。
+     *
+     * 写属性而不是发事件 —— 它不需要知道「什么时候变了」，只要在读的
+     * 那一刻拿到最新的值就够。所以这没有对应的信道，只有一个属性。
+     *
+     * 缓存命中那条路也要写：手柄可能在缓存有效期内才来读，那时属性
+     * 还是上一次留下的值。
+     */
+    function publishCurrentIndex(value) {
+
+        if (value < 0) {
+            return;
+        }
+
+
+        try {
+
+            document.documentElement.setAttribute(
+                CURRENT_QUESTION_ATTR,
+                String(value)
+            );
+
+        } catch (e) {}
+    }
+
+
     function getCurrentQuestionIndex() {
 
         const now = Date.now();
@@ -3519,6 +3568,9 @@
             now - currentIndexCache.time <
             CONFIG.currentIndexTTL
         ) {
+
+            publishCurrentIndex(currentIndexCache.value);
+
             return currentIndexCache.value;
         }
 
@@ -3531,6 +3583,9 @@
             value: value,
             time: now
         };
+
+
+        publishCurrentIndex(value);
 
 
         return value;
@@ -4581,8 +4636,19 @@
 
     let downloadMenu = null;
 
-    // 菜单是从哪个按钮弹出来的。「成册」要拿它去重放点击。
+    // 菜单挂在哪个按钮底下 —— 只用来定位。
     let downloadAnchor = null;
+
+    /*
+     * 用户当时真正点在那个元素上。「成册」重放的是**这一下**。
+     *
+     * 不能拿 downloadAnchor 去重放。守卫认的是 closest('app-download')，
+     * 所以那是宿主元素；而真人点的是它里头的图标。事件只沿派它的那个元素
+     * 往上冒 —— 派给宿主的话，挂在它子孙上的监听压根不在传播路径上，一个
+     * 都不会响。粉笔的处理器挂在宿主上还是挂在图标上，只有运行时才知道，
+     * 所以照着真人的样子来最保险（宿主的情况也盖得住：真点宿主时两者相同）。
+     */
+    let downloadOrigin = null;
 
 
     function isDownloadTarget(target) {
@@ -4624,7 +4690,7 @@
      * 会被我们自己的守卫当成「又点了一次下载」吃掉 —— 于是点「题目脱库」
      * 什么都不会发生，而且一点报错都没有。
      */
-    function openDownloadMenu(anchor) {
+    function openDownloadMenu(anchor, origin) {
 
         const doc = uiDoc();
 
@@ -4638,6 +4704,9 @@
 
 
         downloadAnchor = anchor;
+
+        // 真人点的是图标（子孙），不是宿主。重放要用这个，见 downloadOrigin。
+        downloadOrigin = origin || anchor;
 
 
         const menu = doc.createElement('div');
@@ -4695,14 +4764,14 @@
 
     function runDownloadAction(action) {
 
-        const anchor = downloadAnchor;
+        const origin = downloadOrigin;
 
 
         closeDownloadMenu();
 
 
         if (action === 'book') {
-            replayDownload(anchor);
+            replayDownload(origin);
 
             return;
         }
@@ -4825,7 +4894,8 @@
 
 
                 openDownloadMenu(
-                    event.target.closest(DOWNLOAD_SELECTOR)
+                    event.target.closest(DOWNLOAD_SELECTOR),
+                    event.target
                 );
             },
 
@@ -4869,14 +4939,90 @@
     // 这种情况下面会拦下来并说一声，不会装作成功。
     // ---------------------------------------------------------
 
+    // 没给字母的时候按下标自己排。判断题那对「正确 / 错误」就走这条。
+    const CHOICE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+
+    /*
+     * 接口把选项答案编成**下标**，不是字母：{ choice: '3' } 是「第 4 个」，
+     * 多选是逗号串 '0,1,2,3'。这里把它翻成人看的样子。
+     *
+     * 字母优先用页面自己给的那个（选择题的 A/B/C/D 就是它给的）。判断题
+     * 不能用它 —— 那对「正确 / 错误」在页面上压根没渲染字母，label 是空
+     * 串，只认 label 的话这一整个题型导出来都是没答案的。所以空的时候退
+     * 回按位置数。
+     *
+     * 越界故意不编字母：宁可让用户看见一个「7」自己去数选项，也不要凭空
+     * 造一个 —— 造出来的那个看着完全正常，而它是错的。
+     */
+    function choiceToLabels(choice, choices) {
+
+        if (choice === null || choice === undefined || choice === '') {
+            return '';
+        }
+
+
+        const list = Array.isArray(choices) ? choices : [];
+
+
+        return String(choice)
+            .split(',')
+            .map(part => part.trim())
+            .filter(part => part !== '')
+            .map(part => {
+
+                const index = Number(part);
+
+
+                if (!Number.isInteger(index) || index < 0) {
+                    return part;
+                }
+
+
+                const label =
+                    list[index] && list[index].label;
+
+
+                if (label) {
+                    return label;
+                }
+
+
+                /*
+                 * 页面没给字母（判断题那对「正确 / 错误」就是），但**选项
+                 * 本身是在的** —— 那就按位置数。
+                 *
+                 * 选项表里没有这一格，说明这个下标越界了，不编。
+                 */
+                if (index < list.length && index < CHOICE_LETTERS.length) {
+                    return CHOICE_LETTERS[index];
+                }
+
+
+                return part;
+            })
+            .join('');
+    }
+
+
     /*
      * 正确答案。接口给的最准，DOM 里那份是兜底。
      *
-     * correctAnswer 的具体形状没验过（脚本别处没读过它），所以这里按「字
-     * 符串 / 数组 / 什么都不是」三种都兜一遍 —— 猜错了最多是答案那一行不
-     * 好看，不会把整份导出带崩。
+     * 三种形状都兜着，因为「接口哪天换个形状」这件事在这儿是常态：
+     *
+     *   字符串            正确
+     *   数组              按序拼
+     *   对象              **实测就是这个**（见下）
+     *
+     * 对象有两种子形状，靠有没有 choice / blanks 分：
+     *
+     *   { choice: '3' }        选择题：选项下标
+     *   { blanks: ['讲授'] }   填空题：每空一个答案
+     *
+     * choices 是这道题在页面上读到的选项表（extractForCopy 给的），转换
+     * 下标要用它。漏传也不抛，只是转不出来。
      */
-    function readAnswer(raw, ti) {
+    function readAnswer(raw, ti, choices) {
 
         const value = raw ? raw.correctAnswer : null;
 
@@ -4899,6 +5045,34 @@
             typeof value !== 'object'
         ) {
             return String(value);
+        }
+
+
+        if (value) {
+
+            const labels = choiceToLabels(value.choice, choices);
+
+
+            /*
+             * 转出来是空串就往下走。空的 choice 和「本来就不是选择题」
+             * 在这儿长得一样，而填空题给的是 blanks，不能被它挡住。
+             */
+            if (labels) {
+                return labels;
+            }
+
+
+            if (Array.isArray(value.blanks)) {
+
+                return value.blanks
+                    .map(blank =>
+                        blank === null || blank === undefined
+                            ? ''
+                            : String(blank)
+                    )
+                    .filter(Boolean)
+                    .join('、');
+            }
         }
 
 
@@ -4979,7 +5153,8 @@
                     stem: copy.stem,
                     choices: copy.choices,
 
-                    answer: readAnswer(raw, ti),
+                    // 选项表要一起给：接口那份答案是下标，得靠它翻成字母。
+                    answer: readAnswer(raw, ti, copy.choices),
 
                     solution: htmlToText(data.solution),
                     source: data.source || '',
@@ -5412,6 +5587,11 @@
             ASK_EVENT: ASK_EVENT,
             ASK_ATTR: ASK_ATTR,
             ASK_RESULT_ATTR: ASK_RESULT_ATTR,
+
+            // 当前题号那个属性名，手柄脚本要拿它比对 —— 两边对不上，
+            // 手柄就会去猜题号，而猜错的代价是永久锁掉一道题。
+            CURRENT_QUESTION_ATTR: CURRENT_QUESTION_ATTR,
+            getCurrentQuestionIndex: getCurrentQuestionIndex,
 
             // 导出是为了让侧边栏脚本的测试能读到答题卡的位置 —— 那边有
             // 一条测试盯着「AI 面板的上边缘和答题卡齐平」。数字抄一份过去

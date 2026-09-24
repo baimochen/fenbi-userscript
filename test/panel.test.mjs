@@ -249,9 +249,11 @@ describe('页面上不留任何设置入口', () => {
 
         const controls = [...root.querySelectorAll('button, input, select')];
 
+        // 第二个类是给手柄认的契约名（CONFIG.toggleOpenClass）—— 手柄
+        // 不该依赖 collapse 这种纯外观名字，那玩意儿改样式时顺手就改了。
         assert.deepEqual(
             controls.map(node => node.className),
-            ['collapse'],
+            ['collapse ' + api.CONFIG.toggleOpenClass],
             '面板里除了收起按钮不该有别的控件'
         );
     });
@@ -276,7 +278,7 @@ describe('头部条', () => {
         assert.equal(
             root.querySelector('.wrap').style.display,
             'none',
-            '收起后页面上一根线都不该留'
+            '收起后原来那一大块不该留'
         );
     });
 
@@ -288,6 +290,70 @@ describe('头部条', () => {
         press('KeyQ', { altKey: true });
 
         assert.notEqual(root.querySelector('.wrap').style.display, 'none');
+    });
+});
+
+/*
+ * 收起后剩的那个小标。
+ *
+ * 这是对手柄那条路的前提：手柄要开关面板，靠的就是「展开时点收起键、
+ * 收起后点小标」。原来收起来是页面上什么都不留，手柄只能靠事件信道
+ * 那一套 —— 那条路已经拆了，改成跟别的动作一样点 DOM。
+ */
+describe('收起后的小标', () => {
+
+    test('收起之前不占地方', () => {
+
+        const { root } = boot();
+
+        assert.equal(
+            root.querySelector('.' + api.CONFIG.toggleClosedClass),
+            null,
+            '面板还开着呢，边上就多出来一个按钮'
+        );
+    });
+
+    test('收起后出现，认出它自己是给谁的', () => {
+
+        const { root, click } = boot();
+
+        click('.collapse');
+
+        const tab = root.querySelector('.' + api.CONFIG.toggleClosedClass);
+
+        assert.ok(tab, '收起来之后就没有任何入口了，手柄和人都找不回来');
+        assert.equal(tab.tagName, 'BUTTON');
+    });
+
+    test('点它把面板叫回来，而且它自己收掉', () => {
+
+        const { root, click } = boot();
+
+        click('.collapse');
+        click('.' + api.CONFIG.toggleClosedClass);
+
+        assert.notEqual(root.querySelector('.wrap').style.display, 'none');
+
+        assert.equal(
+            root.querySelector('.' + api.CONFIG.toggleClosedClass),
+            null,
+            '面板都展开了，小标还挂在页面上'
+        );
+    });
+
+    test('收起 / 展开来回几次，小标不会越攒越多', () => {
+
+        const { root, click } = boot();
+
+        for (let i = 0; i < 3; i++) {
+            click('.collapse');
+            click('.' + api.CONFIG.toggleClosedClass);
+        }
+
+        assert.equal(
+            root.querySelectorAll('.' + api.CONFIG.toggleClosedClass).length,
+            0
+        );
     });
 });
 

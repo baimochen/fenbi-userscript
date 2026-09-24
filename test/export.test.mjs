@@ -56,7 +56,9 @@ function fakeSolution(overrides) {
     return Object.assign(
         {
             globalId: '3_32_f62k6',
-            correctAnswer: 'B',
+
+            // 实测的形状：下标，不是字母。见下面「答案的几种形状」。
+            correctAnswer: { choice: '1', type: 201 },
             solution: '<p>本题考查《学记》。</p><p>故正确答案为B。</p>',
             source: '2025年4月26日山东省青岛市直属学校教师招聘第56题',
             keypoints: [{ name: '教育学的萌芽阶段' }]
@@ -230,7 +232,7 @@ describe('答案的几种形状', () => {
         assert.equal(layout.readAnswer({ correctAnswer: '有计划' }, ti), '有计划');
     });
 
-    test('数组拼起来 —— 多选和不定项', () => {
+    test('数组拼起来', () => {
 
         assert.equal(
             layout.readAnswer({ correctAnswer: ['A', 'C', 'D'] }, ti),
@@ -240,8 +242,6 @@ describe('答案的几种形状', () => {
 
     test('数组里是对象也认', () => {
 
-        // 具体形状没验过（脚本别处没读过这个字段），所以按几种常见的键
-        // 各兜一下。猜错了最多是这一行不好看，不会把整份导出带崩。
         assert.equal(
             layout.readAnswer({ correctAnswer: [{ content: 'A' }, { content: 'B' }] }, ti),
             'AB'
@@ -253,6 +253,156 @@ describe('答案的几种形状', () => {
         for (const raw of [null, {}, { correctAnswer: null }]) {
             assert.equal(layout.readAnswer(raw, ti), '');
         }
+    });
+});
+
+
+/*
+ * 实测的那套接口数据（专项智能练习·教育教学技能，50 道）里，correctAnswer
+ * 是**下标**不是字母：
+ *
+ *   单选 / 多选 / 不定项 / 判断   { choice: '3', type: 201 }
+ *   填空                          { blanks: ['讲授'], type: 202 }
+ *
+ * 多选是逗号串（'0,1,2,3' = 全选）。
+ *
+ * 「下标 → 字母」这件事本身就是全部的风险所在：对不上的话导出来的是一份
+ * 看着很像样、其实全错的答案，比空着糟得多。所以下面除了单元级的几条，
+ * 还有一条拿**页面和接口两个独立来源**对着看的 —— 那才是真正的验证。
+ */
+describe('答案是下标，要转成字母', () => {
+
+    test('下标按这道题自己的选项表转', () => {
+
+        const choices = [
+            { label: 'A', text: '甲' },
+            { label: 'B', text: '乙' },
+            { label: 'C', text: '丙' },
+            { label: 'D', text: '丁' }
+        ];
+
+        const at = index =>
+            layout.readAnswer(
+                { correctAnswer: { choice: index } },
+                null,
+                choices
+            );
+
+        assert.equal(at('0'), 'A');
+        assert.equal(at('3'), 'D');
+    });
+
+
+    test('多选是逗号串，按序拼起来', () => {
+
+        const choices = ['A', 'B', 'C', 'D'].map(label => ({ label: label }));
+
+        assert.equal(
+            layout.readAnswer(
+                { correctAnswer: { choice: '0,1,2' } },
+                null,
+                choices
+            ),
+            'ABC'
+        );
+
+        assert.equal(
+            layout.readAnswer(
+                { correctAnswer: { choice: '0,1,2,3' } },
+                null,
+                choices
+            ),
+            'ABCD'
+        );
+    });
+
+
+    test('页面没渲染字母的（判断题），按位置退回去', () => {
+
+        // 判断题那对「正确 / 错误」在页面上只有文字，label 是空串 ——
+        // 只认 label 的话，这一整个题型导出来都是没有答案的。
+        const choices = [{ label: '' }, { label: '' }];
+
+        assert.equal(
+            layout.readAnswer(
+                { correctAnswer: { choice: '1' } },
+                null,
+                choices
+            ),
+            'B',
+            '判断题的答案丢了 —— 它的选项在页面上没有字母'
+        );
+    });
+
+
+    test('下标越界不编字母', () => {
+
+        // 宁可让用户看见一个「7」去自己对着选项数，也不要凭空编一个字母
+        // —— 编出来的那个看起来完全正常，而它是错的。
+        const choices = [{ label: 'A' }, { label: 'B' }];
+
+        assert.equal(
+            layout.readAnswer(
+                { correctAnswer: { choice: '7' } },
+                null,
+                choices
+            ),
+            '7'
+        );
+    });
+
+
+    test('填空题给的是每空的答案', () => {
+
+        assert.equal(
+            layout.readAnswer(
+                { correctAnswer: { blanks: ['讲授'], type: 202 } },
+                null,
+                []
+            ),
+            '讲授'
+        );
+    });
+
+
+    test('选项表没给（老调用方式）也不炸', () => {
+
+        // readAnswer 的第三个参数是后加的。漏传的时候下标无从转换，
+        // 但不能抛 —— 抛出去整份导出就没了。
+        assert.doesNotThrow(() =>
+            layout.readAnswer({ correctAnswer: { choice: '0,1' } }, null)
+        );
+    });
+
+
+    test('页面和接口两个来源对得上 —— 这条才是真的验了映射', () => {
+
+        /*
+         * 存档里那道单选题，页面上「正确答案」那一格写着 B（缓存空的时候
+         * 导出来就是这个字母，见上面「缓存没命中就退回 DOM」那条）。
+         *
+         * 接口那份给的是 { choice: '1' }。两个来源各自独立，能对上就说明
+         * 「下标 1 = 第 2 个 = B」这条映射是真的 —— 只拿接口自己验，映射
+         * 反了也照样绿。
+         */
+        layout.solutionCache.set(
+            '3_32_f62k6',
+            fakeSolution({ correctAnswer: { choice: '1', type: 201 } })
+        );
+
+        const fromApi = byKey('3_32_f62k6').answer;
+
+        layout.solutionCache.clear();
+
+        const fromDom = byKey('3_32_f62k6').answer;
+
+        assert.equal(fromDom, 'B', '前提就不成立：页面上那一格不是 B');
+
+        assert.equal(
+            fromApi,
+            fromDom,
+            '接口的下标和页面上的字母对不上 —— 导出来的答案会全错，而且看不出来'
+        );
     });
 });
 

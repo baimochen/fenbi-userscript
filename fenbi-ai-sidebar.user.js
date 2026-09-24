@@ -4,7 +4,7 @@
 // @version      2.3
 // @description  在页面左侧悬浮一块 AI 面板，支持 ChatGPT / Gemini / Claude 等 13 家。所有设置都在油猴菜单里，页面上只留一块 iframe
 // @author       baimochen
-// @match        *://*.fenbi.com/*
+// @match        *://*.fenbi.com/ti/memorize/*
 // @run-at       document-idle
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -110,6 +110,24 @@
         // 送完往回写一个结果码，布局脚本读了才知道这一下成没成 ——
         // 否则按钮只能瞎报「已发送」。
         askResultAttr: 'data-fbai-ask-result',
+
+        // 手柄开关面板靠这三样，跟 fenbi-gamepad.user.js 的 AI_HIDDEN_ATTR /
+        // AI_OPEN_CLASS / AI_CLOSED_CLASS 逐一对应，有契约测试盯着。
+        //
+        // 原来这里走的是一条事件信道（手柄发 fbai-toggle、这边听完把结果
+        // 写回属性）。那条路能用，但它是全部动作里唯一一个「不是点 DOM」
+        // 的 —— 侧边栏这边一改，手柄那边就得跟着改口径。
+        //
+        // 现在改成手柄直接点按钮，跟点「展开解析」没有任何区别：面板展开
+        // 时点头部那个收起键，收起后点屏幕边上的小标。两个按钮各挂一个
+        // 类名，状态写在宿主元素上 —— 两个按钮在 DOM 里同时存在（收起的
+        // 那个只是被 display:none 的容器罩着，不是被摘掉），手柄得知道
+        // 该点哪个。
+        //
+        // 面板在 shadow DOM 里，手柄要先拿宿主再进 shadowRoot 才够得着。
+        hiddenAttr: 'data-fbai-hidden',
+        toggleOpenClass: 'fbai-collapse',
+        toggleClosedClass: 'fbai-tab',
 
         // 塞进 iframe 的那条消息用这个标记认领。
         //
@@ -289,7 +307,11 @@
     // 宽度不在这里 —— 它只听 CONFIG.panelWidth 的，见上面的说明。
     const DEFAULTS = {
 
-        // 面板收起来了没有。收起后页面上不留任何东西，靠快捷键或菜单叫回来。
+        // 面板收起来了没有。
+        //
+        // 收起后**不留原来那一大块**，但边上会剩一个小标（CONFIG 里的
+        // toggleClosedClass）—— 这是特意留的：躺着手柄一按就关掉了，
+        // 关掉之后总得有个地方能一眼看见、一下点回来。手柄也是点它。
         hidden: false,
 
         service: 'chatgpt',
@@ -455,6 +477,39 @@
         .collapse:hover {
             background: #f4f7fb;
             color: #303133;
+        }
+
+        /*
+         * 收起之后剩下的小标，贴在原来面板的位置上。
+         *
+         * 跟面板用同一套圆角 / 边框 / 阴影，看着像同一块东西收起来了，
+         * 而不是凭空多出来一个按钮。竖向排字是为了窄 —— 躺床上看视频
+         * 的时候，右边那点地方很挤。
+         */
+        .tab {
+            position: fixed;
+            top: ${CONFIG.panelTop}px;
+            left: ${CONFIG.panelLeft}px;
+            width: 30px;
+            padding: 9px 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font: inherit;
+            font-size: 15px;
+            line-height: 1;
+            color: #606266;
+            background: rgba(255, 255, 255, 0.98);
+            border: 1px solid #e7eaf0;
+            border-radius: 9px;
+            box-shadow: 0 3px 14px rgba(0, 0, 0, 0.07);
+            cursor: pointer;
+            z-index: ${CONFIG.zIndex};
+        }
+
+        .tab:hover {
+            color: #303133;
+            background: #f4f7fb;
         }
 
         .panel-body {
@@ -704,7 +759,11 @@
 
         const title = el('div', 'panel-title');
 
-        const collapse = el('button', 'collapse', '⟨');
+        const collapse = el(
+            'button',
+            'collapse ' + CONFIG.toggleOpenClass,
+            '⟨'
+        );
 
         const body = el('div', 'panel-body');
 
@@ -738,6 +797,10 @@
         };
 
 
+        // 收起之后那个小标。收起来才建、展开就摘掉。
+        let tab = null;
+
+
         function currentService() {
 
             return SERVICES[state.prefs.service]
@@ -756,10 +819,66 @@
         }
 
 
+        /*
+         * 收起之后剩的那个小标。收起来才建、展开就摘掉 —— 不是一直在
+         * DOM 里切 display：面板展开时它是个多余控件（面板里除了头部条
+         * 和 iframe 不该有别的东西，有测试盯着），摘掉手柄那边也少一个
+         * 要排除的对象。
+         */
+        function syncTab(hidden) {
+
+            if (!hidden) {
+
+                if (tab) {
+
+                    tab.remove();
+
+                    tab = null;
+                }
+
+
+                return;
+            }
+
+
+            if (tab) {
+                return;
+            }
+
+
+            tab = el('button', 'tab ' + CONFIG.toggleClosedClass, '🤖');
+
+            tab.type = 'button';
+
+            tab.title = '展开 AI 助手（Alt+Q）';
+
+            tab.setAttribute('aria-label', '展开 AI 助手');
+
+            tab.addEventListener('click', () => setHidden(false));
+
+
+            root.appendChild(tab);
+        }
+
+
         function render() {
 
-            wrap.style.display =
-                state.prefs.hidden ? 'none' : 'flex';
+            const hidden = Boolean(state.prefs.hidden);
+
+
+            wrap.style.display = hidden ? 'none' : 'flex';
+
+
+            /*
+             * 手柄靠这个属性才知道该点哪个按钮 —— 两个按钮在 DOM 里
+             * 同时存在，收起的那个只是被 display:none 的容器罩着。写在
+             * 宿主上（不是 shadow 里），手柄不用进 shadowRoot 就能读到。
+             */
+            host.setAttribute(CONFIG.hiddenAttr, hidden ? '1' : '0');
+
+
+            syncTab(hidden);
+
 
             panel.style.width =
                 CONFIG.panelWidth + 'px';
@@ -830,6 +949,28 @@
             state.prefs.hidden = Boolean(value);
 
             writePref('hidden', state.prefs.hidden);
+
+
+            /*
+             * 独立窗口模式下，AI 其实在一个**真正的浏览器窗口**里，不在
+             * 页面上。render() 只动页面上那块 wrap —— 光藏 wrap，用户
+             * 正盯着的那扇窗还开着，看起来就是「关了没反应」。
+             *
+             * 手柄那条路和菜单那条路都走这个函数，所以关窗写在这里，
+             * 两条路一起修好，不用各写一份。
+             *
+             * 只关我们自己开的那扇（state.window 是 openWindow 存下来的
+             * 把手）—— 用户自己开的粉笔页面不能碰。
+             */
+            if (state.prefs.hidden && state.window) {
+
+                try {
+                    state.window.close();
+                } catch (e) {}
+
+                state.window = null;
+            }
+
 
             render();
         }
@@ -1002,6 +1143,19 @@
     // 快捷键
     // =========================================================
 
+    /*
+     * 切一次面板的显示状态。键盘快捷键走这里，菜单里那一项也走这里。
+     *
+     * 手柄原来也走这里（发个 fbai-toggle 事件过来）。现在不走这条了 ——
+     * 它直接点按钮，跟点别的任何东西一样，见 CONFIG.toggleOpenClass 上面
+     * 那段说明。
+     */
+    function togglePanel(ui) {
+
+        ui.toggle();
+    }
+
+
     function bindHotkey(ui) {
 
         const hotkey = CONFIG.hotkey;
@@ -1030,7 +1184,7 @@
 
             event.preventDefault();
 
-            ui.toggle();
+            togglePanel(ui);
 
         }, true);
 

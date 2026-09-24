@@ -18,7 +18,6 @@ export const USERSCRIPT = join(ROOT, 'fenbi-ai-sidebar.user.js');
 export const LAYOUT_SCRIPT = join(ROOT, 'fenbi-memorize-layout.user.js');
 
 const booted = [];
-const FAKE_WINDOW = { focus() {} };
 
 export function ensureFixture() {
     if (!fixtureExists()) {
@@ -51,6 +50,7 @@ export function boot(options) {
 
     const copied = [];   // 剪贴板写入的内容
     const opened = [];   // window.open 收到的参数
+    const windows = [];  // 开出来的假窗口把手，能看 close() 有没有被调
     const posted = [];   // 发进 iframe 的 postMessage
     const prefs = {};    // 假的 GM 存储
     const logged = [];   // console.log 的内容
@@ -93,9 +93,29 @@ export function boot(options) {
         value: { writeText: text => copied.push(text) }
     });
 
+    // 每个窗口一个独立把手。共用同一个对象的话，「关掉的是不是刚开的
+    // 那一扇」就没法验了 —— 那正好是收起面板时最容易搞错的一处。
+    //
+    // postMessage 也要有：独立窗口模式下题目就是往这儿发的，没有它
+    // deliver 会抛异常被自己的 try 吞掉，测试看到的是「什么都没发生」，
+    // 而那和「发到别处去了」长得一模一样。
     win.open = (url, name, features) => {
+        const handle = {
+            url,
+            name,
+            closed: false,
+            focused: false,
+            focus() { this.focused = true; },
+            close() { this.closed = true; },
+            postMessage(message, origin) {
+                posted.push({ message, origin, via: 'window' });
+            }
+        };
+
         opened.push({ url, name, features });
-        return FAKE_WINDOW;
+        windows.push(handle);
+
+        return handle;
     };
 
     // jsdom 不会真去加载跨域 iframe，contentWindow 一直是 null。浏览器里它
@@ -109,7 +129,7 @@ export function boot(options) {
             if (!this.__fbWindow) {
                 this.__fbWindow = {
                     postMessage: (message, origin) =>
-                        posted.push({ message, origin })
+                        posted.push({ message, origin, via: 'frame' })
                 };
             }
             return this.__fbWindow;
@@ -136,6 +156,7 @@ export function boot(options) {
         root,
         copied,
         opened,
+        windows,
         posted,
         prefs,
         logged,

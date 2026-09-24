@@ -70,6 +70,33 @@ function extractQuestions(html) {
     return picked;
 }
 
+// 原生答题卡。手柄的「下一题 / 上一题」就是点它里面第 index 个按钮
+// （gotoQuestion），所以夹具里没有它，翻题这条路整条测不到 —— 脚本会
+// 因为找不到按钮而默默不动，看起来像「翻题没实现」。
+//
+// 存档里那张卡有 40 个按钮，题号跟题序一一对应。夹具只装了 5 道题，
+// 所以只取前 count 个，让「按钮 i ↔ 第 i 题」这个前提在夹具里也成立。
+function extractAnswerCard(html, count) {
+    const m = html.match(/<app-answer-button[\s\S]*?<\/app-answer-button>/);
+    if (!m || count < 1) return '';
+
+    // 存档里那道是答过的（button 上带 wrong），夹具里要是没答过的状态。
+    // 注意别写成 class="answer-btn[^"]*" —— 包着按钮的 div 叫
+    // answer-btn-container，前缀一样，那样会把容器的 class 也改掉。
+    const one = clean(m[0]).replace(/class="answer-btn(?:\s[^"]*)?"/g, 'class="answer-btn"');
+
+    const buttons = Array.from({ length: count }, (_, i) =>
+        one.replace(/(<button\b[^>]*>)[\s\S]*?(<\/button>)/, (all, open, close) => open + ' ' + (i + 1) + ' ' + close)
+    ).join('');
+
+    return (
+        '<app-answer-card class="ng-star-inserted"><div class="answer-card-container">' +
+        '<div class="answer-card-body"><div class="chapter-card"><div class="ques-group">' +
+        buttons +
+        '</div></div></div></div></app-answer-card>'
+    );
+}
+
 function extractMaterials(html) {
     const start = html.indexOf('<app-materials');
     if (start < 0) return '';
@@ -88,7 +115,7 @@ export function buildFixture() {
         const html = readFileSync(join(ROOT, name), 'utf8');
         const questions = extractQuestions(html);
         if (!best || questions.size > best.questions.size) {
-            best = { name, questions, materials: extractMaterials(html) };
+            best = { name, html, questions, materials: extractMaterials(html) };
         }
     }
 
@@ -97,6 +124,9 @@ export function buildFixture() {
     //   乙组 —— 没有材料，material 必须是空串
     const withMaterial = ['单选题', '多选题', '不定项'];
     const withoutMaterial = ['判断题', '填空题'];
+
+    // 夹具里实际装了哪几道 —— 答题卡的按钮要跟它一一对应
+    const shown = [...withMaterial, ...withoutMaterial].filter(t => best.questions.has(t));
 
     function group(types, material) {
         const left = material
@@ -119,6 +149,7 @@ export function buildFixture() {
         '<!-- 由 test/make-fixture.mjs 从本地存档生成，勿手改；不进版本库。 -->',
         group(withMaterial, best.materials),
         group(withoutMaterial, ''),
+        extractAnswerCard(best.html, shown.length),
         '</body></html>'
     ];
 
