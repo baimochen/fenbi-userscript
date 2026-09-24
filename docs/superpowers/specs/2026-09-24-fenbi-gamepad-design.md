@@ -29,7 +29,6 @@
 | 填空题软键盘 | 用户明确排除。手柄打字要么做摇杆选字母的软键盘，要么上外接键盘，都是另一个项目 |
 | 通用空间导航（任意网页） | 用户选定只做粉笔刷题场景。通用导航是另一套架构（焦点模型 + 元素可达性计算），不在这个脚本里 |
 | 合成键盘事件 | 见 4.4。跟现有快捷键撞车，且谁先跑取决于监听顺序，出了 bug 极难查 |
-| 震动反馈 | `vibrationActuator` 是 Chrome 专属；而且 6.1 实测按下那一刻选项就变色了，视觉反馈已经够。YAGNI |
 | 每个动作的「装了 / 没装另外两个脚本」双路径 | 用户会三份全装（README 里「询问 AI」那条链路本来就要求装齐）。第二条路径是白写的。YAGNI |
 
 > 「双路径」指的是**每条动作都写两套实现**。「当前第几题」的读取回退（2.2）不在此列 —— 那是一处约 20 行的查询，不是动作的执行路径。
@@ -178,6 +177,25 @@
 
 它的渲染条件是「**有选中项但未提交**」—— 提交后按钮消失、解析才出来（见 6.5）。所以 LT 的动作要写成「找得到就点，找不到就静默跳过」，不能写成「一进题就必须找到」。
 
+### 3.5 震动反馈
+
+**触发信号**：当前题的 `div.ti-container` 拿到 `correct` / `wrong` 类（6.6 实测 226ms 出现）。
+
+| 判定 | 震动 | 参数 |
+|---|---|---|
+| 答对 | 短震**两下** | 各 100ms，中间隔 80ms，共 280ms |
+| 答错 | 长震**一下** | 400ms |
+| 上限 | — | **都控制在 0.5 秒以内** |
+
+- **答对用两个马达的强弱差做出「两下」的区分度**：`weakMagnitude: 0.6` / `strongMagnitude: 1.0`。两下之间用 `setTimeout` 排，所以得**维护一个计时器 token**
+- **新的震动取消上一次没震完的**：你答完立刻翻下一题时，上一题第二下还没响，不取消的话两个反馈会串在一起
+- **翻题、跳题要取消还没触发的对错监听**：否则翻走之后原地响一下，莫名其妙
+- **超时 3 秒放弃**：万一 `.ti-container` 没拿到类（比如那题其实是填空题），监听器不能永远挂着
+- **`vibrationActuator` 是 Chrome / Edge 专属**，Firefox 和 Safari 上没有这个对象 —— 静默跳过，不报错
+- **设置浮层里给一个开关**。震动虽无声，但不是所有人都想要
+
+这个动作不占键位 —— 它是选选项/提交的副产品，不是独立动作。
+
 ---
 
 ## 四、错误处理与边界
@@ -203,7 +221,7 @@
 - 给 `navigator.getGamepads` 打桩，返回可控的假 `Gamepad` 对象（`{id, mapping, buttons:[{pressed,value}], axes:[]}`）
 - 让 rAF 能被**手动步进**，而不是等真定时器 —— 等真定时器测试会飘
 
-这两样收进 `test/harness.mjs` 里新增的 `bootGamepad()`，**不污染现有夹具**。现有 15 个测试文件都得继续能跑。
+这两样收进 `test/harness.mjs` 里新增的 `bootGamepad()`，**不污染现有夹具**。现有 11 个测试文件都得继续能跑。
 
 ### 5.2 测什么
 
@@ -212,11 +230,12 @@
 | ② 识别层 | 纯函数直接喂帧序列。重点：死区边界（0.349 不触发 / 0.351 触发）、按下沿只触发一次、长按的 400ms/80ms 节奏、松开后状态清干净 |
 | ④ 配置层 | 假 GM 存储读写往返；没存过时落回默认；坏数据（存了条不存在的动作 id）不炸 |
 | ③ 动作层 | 起 jsdom，灌假手柄，步进 rAF，断言「按下面键 1 → 第 3 题的 `label.choice-radio-label` 收到 click」 |
+| 震动 | 假 `vibrationActuator` 记录调用序列。重点：答对是两次 100ms、间隔 80ms；答错是一次 400ms；总时长都 ≤ 500ms；新震动取消上一次；翻题取消未触发的对错监听；超时 3 秒放弃；没有 `vibrationActuator` 时不炸 |
 | 契约 | `gamepad.TOGGLE_EVENT === sidebar.CONFIG.toggleEvent`；`gamepad.CURRENT_QUESTION_ATTR === layout.CURRENT_QUESTION_ATTR` |
 
 ### 5.3 回归底线
 
-现有 15 个测试文件全部保持通过。改动只碰 `fenbi-ai-sidebar.user.js` 的加信道那部分，所以重点盯 `test/panel.test.mjs` 和那条已有的信道契约测试。
+现有 11 个测试文件全部保持通过。改动只碰 `fenbi-ai-sidebar.user.js` 的加信道那部分，所以重点盯 `test/panel.test.mjs` 和那条已有的信道契约测试。
 
 ---
 
@@ -232,13 +251,13 @@
 |---|---|---|---|---|
 | 点击前 | `input-radio` | false | false | false |
 | 点击后·立即 | `input-radio` | **true** | false | false |
-| 点击后·1.5 秒 | `input-radio` | true | **true** | **true** |
+| 点击后·稍后 | `input-radio` | true | **true** | **true** |
 
 三条结论：
 
-1. **按下即有视觉反馈**（选项立刻变色），所以不需要额外的按键反馈 —— 1.2 里砍掉震动反馈这条得到了实证支持
+1. **按下即有视觉反馈**（选项立刻变色）
 2. **答完即锁**：`被禁用` 由 false 变 true，一题只能答一次。见 3.3
-3. 解析要等约 1.5 秒才出来 —— 正是 README 里「点完选项等解析的那一下卡顿」，也就是布局脚本用缓存渲染干掉的东西。**手柄脚本不管这个延迟**
+3. 解析的出现时机见 6.6 —— 早先一次粗采样曾误判成「约 1.5 秒」，那是采样粒度造成的假象，实测是 226ms 以内
 
 ### 6.2 三种题型的选项结构
 
@@ -270,6 +289,29 @@
 
 `.memorize-confirm-btn`，文字「确定」。**渲染条件是「有选中项但未提交」**：选中选项后出现且可用，提交后消失、解析才出来。
 
+### 6.6 对错信号，以及点击后的完整时间线
+
+用 `MutationObserver` 监听整个 `body` 的 class / style 变化，点一个选项，实测时间线：
+
+| 时刻 | 谁变了 | 变成什么 |
+|---|---|---|
+| +6ms | `div.fb-sol-panel` | `fb-sol-visible` |
+| +24ms | `ul.choice-radios`、`input.option-radio` | Angular 的 touched/pristine |
+| +225ms | `button.answer-btn`（原生答题卡） | `answer-btn wrong` |
+| **+226ms** | **`div.ti-container`** | **`ti-container showBg wrong`** |
+| +226ms | 原生解析区 `app-solution-choice` 整棵 | 带 `input-radio correct/wrong/correctLost`、`overall-item-value your-answer …`、`your-answer-wrong`、`correct-answer` |
+| +393ms | `button.fbac-question`（布局脚本的答题卡） | `is-wrong` |
+
+**`div.ti-container` 上的 `showBg` + `correct` / `wrong` 就是震动要的信号**，226ms 出现，对感知而言是即时的。
+
+三条要点：
+
+1. **这是纯 DOM 就够的信号，不需要任何新契约。** 一度考虑过「让布局脚本把接口里的答案写出来」（因为当时误以为要等 1.5 秒），现在作废 —— 不用改 `fenbi-memorize-layout.user.js`
+2. **`correct` / `wrong` 是状态，`showBg` 只是「要不要画背景」的开关**（`.ti-container.wrong.showBg:before` 才上背景）。判对错认前两个，别认 `showBg`
+3. **`div.ti-container` 在 `app-ti` 里面**，路径是 `app-ti > div.ti-container > div.ti-content`。这跟 6.2 的选项结构是分开的两层
+
+`+225ms` 的 `.answer-btn` 和 `+393ms` 的 `.fbac-question` 是两个附赠信号 —— 后者可以给「答题卡跳题浮层」标出哪些题做对了、哪些做错了。
+
 ---
 
 ## 七、实施前还要验证的
@@ -283,6 +325,7 @@
 
 1. ④ 配置层 + ② 识别层（纯函数，TDD，全程不碰 DOM）
 2. ③ 动作层，先做「选选项 + 翻题」两条，在真实页面上验手感
-3. 加角标 + 设置浮层（绑定界面）
-4. 加契约：`fbai-toggle` 信道、`data-fbai-current-question` 属性
-5. 补齐剩余动作：滚动、解析、跳题、交卷、回退
+3. **震动反馈**（3.5）—— 它是选选项的副产品，紧接着做，尽早拿真手柄验手感
+4. 加角标 + 设置浮层（绑定界面）
+5. 加契约：`fbai-toggle` 信道、`data-fbai-current-question` 属性
+6. 补齐剩余动作：滚动、解析、跳题、交卷、回退
